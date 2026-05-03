@@ -1,0 +1,160 @@
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { useAuthStore } from '../store/authStore';
+import { api, type Project } from '../api/client';
+import { Icon } from '../components/Icon';
+import { usePageTitle } from '../hooks/usePageTitle';
+
+const QUICK_ACTIONS = [
+  { type: 'logo', label: 'Logo', icon: 'pentagon', bg: 'bg-primary-container', text: 'text-on-primary-container' },
+  { type: 'social', label: 'Social Post', icon: 'share', bg: 'bg-secondary-container', text: 'text-on-secondary-container' },
+  { type: 'banner', label: 'Banner', icon: 'crop_landscape', bg: 'bg-tertiary-container', text: 'text-on-tertiary-container' },
+  { type: 'custom', label: 'Custom Prompt', icon: 'auto_awesome', bg: 'bg-on-surface', text: 'text-surface' },
+];
+
+export function Dashboard() {
+  const { user } = useAuthStore();
+  usePageTitle('My Designs');
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [showAll, setShowAll] = useState(false);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const load = (p: number) => {
+    setLoading(true);
+    api.listProjects(p)
+      .then((res) => { setProjects(res.projects || []); setTotal(res.total || 0); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(page); }, [page]);
+
+  const handleDelete = async () => {
+    if (!deleteId) return;
+    setDeleting(true);
+    try {
+      await api.deleteProject(deleteId);
+      setProjects((prev) => prev.filter((p) => p.id !== deleteId));
+      setTotal((t) => t - 1);
+    } finally {
+      setDeleting(false);
+      setDeleteId(null);
+    }
+  };
+
+  const firstName = user?.display_name?.split(' ')[0] || 'there';
+  const displayed = showAll ? projects : projects.slice(0, 6);
+
+  return (
+    <div className="p-4 sm:p-6 md:p-10 max-w-7xl mx-auto w-full space-y-12">
+      <section>
+        <h2 className="font-headline text-3xl sm:text-4xl font-extrabold tracking-tight text-on-surface mb-2">
+          Ready to create, {firstName}?
+        </h2>
+        <p className="text-on-surface-variant max-w-lg mb-8">Pick a starting point — one prompt, one polished design.</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+          {QUICK_ACTIONS.map((action) => (
+            <Link key={action.type} to={`/create?type=${action.type}`}
+              className={`group relative ${action.bg} p-5 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] overflow-hidden hover:scale-[1.02] transition-transform`}>
+              <div className="absolute -right-4 -bottom-4 opacity-10 group-hover:scale-110 transition-transform">
+                <Icon name={action.icon} filled className={`text-[6rem] sm:text-[8rem] ${action.text}`} />
+              </div>
+              <Icon name="add_circle" className={`${action.text} mb-8 sm:mb-12 text-2xl sm:text-3xl`} />
+              <h3 className={`font-headline font-extrabold ${action.text} text-lg sm:text-xl leading-tight`}>
+                Start a<br />{action.label}
+              </h3>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="font-headline text-2xl font-bold tracking-tight">Recent Designs</h2>
+          {projects.length > 6 && (
+            <button onClick={() => setShowAll(!showAll)}
+              className="font-label text-xs uppercase tracking-widest text-primary font-bold flex items-center gap-1 group">
+              {showAll ? 'Show Less' : `View All (${total})`}
+              <Icon name={showAll ? 'expand_less' : 'arrow_forward'} className="text-sm group-hover:translate-x-1 transition-transform" />
+            </button>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="bg-surface-container-low rounded-3xl overflow-hidden animate-pulse">
+                <div className="aspect-square bg-surface-container" />
+                <div className="p-5 space-y-2">
+                  <div className="h-4 bg-surface-container rounded w-2/3" />
+                  <div className="h-3 bg-surface-container rounded w-1/3" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : projects.length === 0 ? (
+          <div className="bg-surface-container-low rounded-3xl p-12 text-center">
+            <Icon name="folder_open" className="text-6xl text-outline-variant mb-4" />
+            <h3 className="font-headline font-bold text-lg mb-2">No designs yet</h3>
+            <p className="text-on-surface-variant mb-6">Pick a starting point above to begin.</p>
+            <Link to="/create" className="inline-flex items-center gap-2 bg-primary-container text-on-primary-container px-6 py-3 rounded-xl font-headline font-bold">
+              <Icon name="add" /> New Design
+            </Link>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            {displayed.map((project) => (
+              <div key={project.id} className="relative bg-surface-container-low rounded-3xl overflow-hidden group border border-transparent hover:border-primary-container/20 hover:shadow-xl transition-all">
+                <Link to={`/studio/${project.id}`} className="block">
+                  <div className="aspect-square relative overflow-hidden bg-surface-container flex items-center justify-center">
+                    {project.thumbnail_url
+                      ? <img src={project.thumbnail_url} alt={project.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" />
+                      : <Icon name="auto_awesome" className="text-5xl text-outline-variant/30" />}
+                    <div className="absolute top-3 left-3 bg-surface/90 backdrop-blur px-3 py-1 rounded-full text-[10px] font-label uppercase font-bold text-on-surface">
+                      {project.status}
+                    </div>
+                    <div className="absolute top-3 right-12 bg-primary-container/90 backdrop-blur px-2 py-0.5 rounded-full text-[10px] font-label uppercase font-bold text-on-primary-container">
+                      {project.type}
+                    </div>
+                  </div>
+                  <div className="p-5 bg-surface-container-lowest">
+                    <h4 className="font-headline font-bold text-base truncate">{project.title}</h4>
+                    <p className="font-label text-[10px] uppercase text-on-surface-variant mt-1">
+                      {new Date(project.updated_at || project.created_at).toLocaleDateString()}
+                    </p>
+                  </div>
+                </Link>
+                <button onClick={(e) => { e.preventDefault(); setDeleteId(project.id); }}
+                  className="absolute top-3 right-3 w-7 h-7 bg-surface/80 backdrop-blur rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-error/10 hover:text-error z-10"
+                  aria-label="Delete project">
+                  <Icon name="close" className="text-sm" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {deleteId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setDeleteId(null)}>
+          <div className="bg-surface-container-lowest rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-headline font-bold text-lg">Delete project?</h3>
+            <p className="text-on-surface-variant text-sm">This will archive the project and its generated assets.</p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setDeleteId(null)} className="px-5 py-2.5 rounded-xl font-headline font-bold text-sm bg-surface-container-high">Cancel</button>
+              <button onClick={handleDelete} disabled={deleting} className="px-5 py-2.5 rounded-xl font-headline font-bold text-sm bg-error text-on-error disabled:opacity-50">
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="pb-8 sm:pb-20" />
+    </div>
+  );
+}

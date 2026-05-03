@@ -1,0 +1,37 @@
+# Build artifacts
+**/node_modules/
+**/dist/
+**/build/
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/venv/
+
+# Model weights and runtime cache (downloaded via download_model.py)
+ai-service/models/*
+!ai-service/models/.gitkeep
+ai-service/SenseNova-U1/
+ai-service/smoke_out.png
+
+# PHP
+backend/vendor/
+
+# Environment & secrets
+**/.env
+**/.env.local
+
+# User-generated content
+uploads/projects/
+backend/uploads/projects/
+
+# Logs and OS junk
+*.log
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
