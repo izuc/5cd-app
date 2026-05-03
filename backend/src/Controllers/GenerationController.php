@@ -38,9 +38,9 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'num_concepts' => max(1, min(4, (int) ($config['numConcepts'] ?? ($data['num_concepts'] ?? 1)))),
-            'width' => (int) ($data['width'] ?? 1024),
-            'height' => (int) ($data['height'] ?? 1024),
-            'steps' => (int) ($data['steps'] ?? 25),
+            'width' => (int) ($data['width'] ?? 2048),
+            'height' => (int) ($data['height'] ?? 2048),
+            'steps' => (int) ($data['steps'] ?? 50),
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
         ];
@@ -108,7 +108,7 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'ref_images' => [base64_encode($bytes)],
-            'steps' => (int) ($data['steps'] ?? 25),
+            'steps' => (int) ($data['steps'] ?? 50),
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'img_cfg_scale' => (float) ($data['img_cfg_scale'] ?? 1.0),
         ];

@@ -64,11 +64,17 @@ const TYPE_OPTIONS: TypeOption[] = [
   },
 ];
 
+// Trained resolution buckets from the upstream model. Generating at these
+// sizes produces sharp text and faithful composition. Going below the
+// trained size — especially for designs containing typography — will
+// scribble the letter-forms.
 const SIZE_OPTIONS = [
-  { value: '1024x1024', label: 'Square 1:1 (1024)', w: 1024, h: 1024 },
-  { value: '1024x768',  label: 'Landscape 4:3',     w: 1024, h: 768 },
-  { value: '768x1024',  label: 'Portrait 3:4',      w: 768,  h: 1024 },
-  { value: '1280x720',  label: 'Wide 16:9',         w: 1280, h: 720 },
+  { value: '2048x2048', label: 'Square 1:1 · 2048 (best)', w: 2048, h: 2048 },
+  { value: '2368x1760', label: 'Landscape 4:3 · 2368',     w: 2368, h: 1760 },
+  { value: '1760x2368', label: 'Portrait 3:4 · 2368',      w: 1760, h: 2368 },
+  { value: '2720x1536', label: 'Wide 16:9 · 2720',         w: 2720, h: 1536 },
+  { value: '1536x2720', label: 'Tall 9:16 · 2720',         w: 1536, h: 2720 },
+  { value: '1024x1024', label: 'Square 1:1 · 1024 (preview, slower text)', w: 1024, h: 1024 },
 ];
 
 const STEPS = 50; // Model was trained on 50 steps; keep it fixed for predictable quality.
