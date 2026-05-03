@@ -57,7 +57,13 @@ export const api = {
   me: () => request<{ user: any }>('/auth/me'),
 
   // -- Projects ------------------------------------------------------
-  listProjects: (page = 1) => request<{ projects: Project[]; total: number; pagination: any }>(`/projects?page=${page}`),
+  listProjects: (opts: { page?: number; limit?: number; q?: string } = {}) => {
+    const params = new URLSearchParams();
+    params.set('page', String(opts.page ?? 1));
+    if (opts.limit) params.set('limit', String(opts.limit));
+    if (opts.q && opts.q.trim()) params.set('q', opts.q.trim());
+    return request<{ projects: Project[]; total: number; pagination: { page: number; limit: number; total: number; pages: number } }>(`/projects?${params.toString()}`);
+  },
   createProject: (data: any) => request<{ project: Project }>('/projects', { method: 'POST', body: JSON.stringify(data) }),
   getProject: (id: number) => request<{ project: Project }>(`/projects/${id}`),
   updateProject: (id: number, data: any) => request<{ project: Project }>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

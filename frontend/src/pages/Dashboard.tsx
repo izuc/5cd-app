@@ -12,34 +12,54 @@ const QUICK_ACTIONS = [
   { type: 'custom', label: 'Custom Prompt', icon: 'auto_awesome', bg: 'bg-on-surface', text: 'text-surface' },
 ];
 
+const PAGE_SIZE = 12;
+
 export function Dashboard() {
   const { user } = useAuthStore();
   usePageTitle('My Designs');
   const [projects, setProjects] = useState<Project[]>([]);
   const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
   const [page, setPage] = useState(1);
-  const [showAll, setShowAll] = useState(false);
+  const [searchInput, setSearchInput] = useState('');
+  const [query, setQuery] = useState('');
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const load = (p: number) => {
+  // Debounce the search box so we don't hit the API on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQuery(searchInput.trim());
+      setPage(1);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useEffect(() => {
     setLoading(true);
-    api.listProjects(p)
-      .then((res) => { setProjects(res.projects || []); setTotal(res.total || 0); })
+    api.listProjects({ page, limit: PAGE_SIZE, q: query })
+      .then((res) => {
+        setProjects(res.projects || []);
+        setTotal(res.total || 0);
+        setPages(res.pagination?.pages || 1);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
-  };
-
-  useEffect(() => { load(page); }, [page]);
+  }, [page, query, refreshKey]);
 
   const handleDelete = async () => {
     if (!deleteId) return;
     setDeleting(true);
     try {
       await api.deleteProject(deleteId);
-      setProjects((prev) => prev.filter((p) => p.id !== deleteId));
-      setTotal((t) => t - 1);
+      // If this was the last item on the page, step back so we don't show an empty grid.
+      if (projects.length === 1 && page > 1) {
+        setPage((p) => p - 1);
+      } else {
+        setRefreshKey((k) => k + 1);
+      }
     } finally {
       setDeleting(false);
       setDeleteId(null);
@@ -47,7 +67,6 @@ export function Dashboard() {
   };
 
   const firstName = user?.display_name?.split(' ')[0] || 'there';
-  const displayed = showAll ? projects : projects.slice(0, 6);
 
   return (
     <div className="p-4 sm:p-6 md:p-10 max-w-7xl mx-auto w-full space-y-12">
@@ -73,15 +92,28 @@ export function Dashboard() {
       </section>
 
       <section>
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="font-headline text-2xl font-bold tracking-tight">Recent Designs</h2>
-          {projects.length > 6 && (
-            <button onClick={() => setShowAll(!showAll)}
-              className="font-label text-xs uppercase tracking-widest text-primary font-bold flex items-center gap-1 group">
-              {showAll ? 'Show Less' : `View All (${total})`}
-              <Icon name={showAll ? 'expand_less' : 'arrow_forward'} className="text-sm group-hover:translate-x-1 transition-transform" />
-            </button>
-          )}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+          <div className="flex items-baseline gap-3">
+            <h2 className="font-headline text-2xl font-bold tracking-tight">My Designs</h2>
+            {!loading && total > 0 && (
+              <span className="font-label text-xs uppercase tracking-widest text-on-surface-variant">
+                {total} {total === 1 ? 'design' : 'designs'}
+              </span>
+            )}
+          </div>
+          <div className="relative w-full sm:w-72">
+            <Icon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-base text-on-surface-variant pointer-events-none" />
+            <input type="search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search designs…"
+              className="w-full bg-surface-container-low border border-outline-variant/15 rounded-xl pl-9 pr-9 py-2.5 text-sm focus:ring-2 focus:ring-primary/30 focus:border-primary placeholder:text-outline-variant" />
+            {searchInput && (
+              <button onClick={() => setSearchInput('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface w-6 h-6 flex items-center justify-center rounded-full hover:bg-surface-container-high"
+                aria-label="Clear search">
+                <Icon name="close" className="text-sm" />
+              </button>
+            )}
+          </div>
         </div>
 
         {loading ? (
@@ -97,17 +129,29 @@ export function Dashboard() {
             ))}
           </div>
         ) : projects.length === 0 ? (
-          <div className="bg-surface-container-low rounded-3xl p-12 text-center">
-            <Icon name="folder_open" className="text-6xl text-outline-variant mb-4" />
-            <h3 className="font-headline font-bold text-lg mb-2">No designs yet</h3>
-            <p className="text-on-surface-variant mb-6">Pick a starting point above to begin.</p>
-            <Link to="/create" className="inline-flex items-center gap-2 bg-primary-container text-on-primary-container px-6 py-3 rounded-xl font-headline font-bold">
-              <Icon name="add" /> New Design
-            </Link>
-          </div>
+          query ? (
+            <div className="bg-surface-container-low rounded-3xl p-12 text-center">
+              <Icon name="search_off" className="text-6xl text-outline-variant mb-4" />
+              <h3 className="font-headline font-bold text-lg mb-2">No matches for “{query}”</h3>
+              <p className="text-on-surface-variant mb-6">Try a different search term.</p>
+              <button onClick={() => setSearchInput('')}
+                className="inline-flex items-center gap-2 bg-surface-container-high px-6 py-3 rounded-xl font-headline font-bold">
+                <Icon name="close" /> Clear search
+              </button>
+            </div>
+          ) : (
+            <div className="bg-surface-container-low rounded-3xl p-12 text-center">
+              <Icon name="folder_open" className="text-6xl text-outline-variant mb-4" />
+              <h3 className="font-headline font-bold text-lg mb-2">No designs yet</h3>
+              <p className="text-on-surface-variant mb-6">Pick a starting point above to begin.</p>
+              <Link to="/create" className="inline-flex items-center gap-2 bg-primary-container text-on-primary-container px-6 py-3 rounded-xl font-headline font-bold">
+                <Icon name="add" /> New Design
+              </Link>
+            </div>
+          )
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {displayed.map((project) => (
+            {projects.map((project) => (
               <div key={project.id} className="relative bg-surface-container-low rounded-3xl overflow-hidden group border border-transparent hover:border-primary-container/20 hover:shadow-xl transition-all">
                 <Link to={`/studio/${project.id}`} className="block">
                   <div className="aspect-square relative overflow-hidden bg-surface-container flex items-center justify-center">
@@ -135,6 +179,22 @@ export function Dashboard() {
                 </button>
               </div>
             ))}
+          </div>
+        )}
+
+        {pages > 1 && (
+          <div className="flex items-center justify-center gap-2 mt-8">
+            <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading}
+              className="flex items-center gap-1 px-4 py-2 rounded-xl bg-surface-container-low text-sm font-bold disabled:opacity-40 disabled:pointer-events-none hover:bg-surface-container">
+              <Icon name="chevron_left" className="text-base" /> Prev
+            </button>
+            <span className="font-label text-xs uppercase tracking-widest text-on-surface-variant px-3">
+              Page {page} of {pages}
+            </span>
+            <button onClick={() => setPage((p) => Math.min(pages, p + 1))} disabled={page >= pages || loading}
+              className="flex items-center gap-1 px-4 py-2 rounded-xl bg-surface-container-low text-sm font-bold disabled:opacity-40 disabled:pointer-events-none hover:bg-surface-container">
+              Next <Icon name="chevron_right" className="text-base" />
+            </button>
           </div>
         )}
       </section>

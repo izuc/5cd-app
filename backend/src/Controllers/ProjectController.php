@@ -22,6 +22,7 @@ class ProjectController
         $limit = min(50, max(1, (int) ($params['limit'] ?? 20)));
         $offset = ($page - 1) * $limit;
         $statusFilter = $params['status'] ?? null;
+        $query = trim((string) ($params['q'] ?? ''));
 
         $db = Database::getConnection();
 
@@ -33,6 +34,13 @@ class ProjectController
         } else {
             $where .= ' AND status != ?';
             $bindings[] = 'archived';
+        }
+        if ($query !== '') {
+            // Match against title or project type so users can search "logo" or by name.
+            $where .= ' AND (title LIKE ? OR type LIKE ?)';
+            $like = '%' . str_replace(['%', '_'], ['\%', '\_'], $query) . '%';
+            $bindings[] = $like;
+            $bindings[] = $like;
         }
 
         $countStmt = $db->prepare("SELECT COUNT(*) AS total FROM projects {$where}");
