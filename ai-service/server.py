@@ -485,11 +485,13 @@ def _process_edit(job: Job) -> None:
     if not refs_b64:
         raise ValueError("edit job requires at least one ref image")
     refs = [_b64_to_pil(b) for b in refs_b64]
-    width = _round_to_grid(int(p.get("width", refs[0].width)))
-    height = _round_to_grid(int(p.get("height", refs[0].height)))
-    steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 100))
-    cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE))
-    img_cfg = float(p.get("img_cfg_scale", 1.0))
+    # Use `or` rather than dict.get default — pydantic sends Optional[int] fields
+    # as explicit None, which dict.get will happily return.
+    width = _round_to_grid(int(p.get("width") or refs[0].width))
+    height = _round_to_grid(int(p.get("height") or refs[0].height))
+    steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 100))
+    cfg = float(p.get("cfg_scale") or DEFAULT_CFG_SCALE)
+    img_cfg = float(p.get("img_cfg_scale") or 1.0)
     seed = p.get("seed")
     if seed is None:
         seed = random.randint(0, 2**31 - 1)
