@@ -23,7 +23,7 @@ export function Sidebar() {
         {NAV_ITEMS.map((item) => {
           const isActive = location.pathname === item.path;
           return (
-            <Link key={item.label} to={item.path}
+            <Link key={item.label} to={item.path} aria-current={isActive ? 'page' : undefined}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
                 isActive
                   ? 'bg-primary-container text-on-primary-container font-bold'

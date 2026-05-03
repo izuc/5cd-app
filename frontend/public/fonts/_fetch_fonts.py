@@ -10,7 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 SOURCES = {
-    "google-fonts.css": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+    "google-fonts.css": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;700;800;900&family=Space+Grotesk:wght@400;500;700&display=swap",
     "material-symbols.css": "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap",
 }
 

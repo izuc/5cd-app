@@ -23,9 +23,13 @@ export function DesignStudio() {
   const [error, setError] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [progress, setProgress] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const initialKickRef = useRef(false);
   const autoChosenRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
 
@@ -71,6 +75,20 @@ export function DesignStudio() {
     return () => { cancelled = true; };
   }, [projectId]);
 
+  // Tick the elapsed-seconds counter while a generation is in flight.
+  useEffect(() => {
+    const generating = project?.status === 'generating' || !!project?.ai_job_id;
+    if (!generating) {
+      setElapsed(0);
+      setProgress(0);
+      return;
+    }
+    setElapsed(0);
+    const startedAt = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [project?.status, project?.ai_job_id]);
+
   // Poll for generation updates while a job is active
   useEffect(() => {
     if (!projectId) return;
@@ -87,6 +105,13 @@ export function DesignStudio() {
         if (ch) setChosen(ch);
         if (res.project_status && project) {
           setProject((p) => p ? { ...p, status: res.project_status as Project['status'], ai_job_id: res.ai_job_id } : p);
+        }
+        // While the job is running, also fetch its progress for the progress bar.
+        if (res.ai_job_id) {
+          try {
+            const status = await api.getJobStatus(res.ai_job_id);
+            if (!cancelled && typeof status.progress === 'number') setProgress(status.progress);
+          } catch {}
         }
         // Stop polling once we have generations AND no active job.
         if (gens.length > 0 && !res.ai_job_id) {
@@ -169,6 +194,7 @@ export function DesignStudio() {
 
   const handleRegenerate = async () => {
     if (!projectId || !project) return;
+    setConfirmRegenerate(false);
     setError('');
     setChatMessages([]);
     initialKickRef.current = true;
@@ -180,7 +206,7 @@ export function DesignStudio() {
         num_concepts: Number(cfg.numConcepts) || 1,
         width: Number(cfg.width) || 1024,
         height: Number(cfg.height) || 1024,
-        steps: Number(cfg.steps) || 25,
+        steps: Number(cfg.steps) || 50,
       });
       setProject((p) => p ? { ...p, status: 'generating', ai_job_id: 'pending' } : p);
     } catch (err: any) {
@@ -217,8 +243,9 @@ export function DesignStudio() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={handleRegenerate} disabled={generating}
-            className="flex items-center gap-1.5 bg-surface-container-high px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50">
+          <button onClick={() => setConfirmRegenerate(true)} disabled={generating}
+            className="flex items-center gap-1.5 bg-surface-container-high px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 hover:bg-surface-container-highest"
+            title="Regenerate (replaces current concepts)">
             <Icon name="autorenew" className="text-base" /> Regenerate
           </button>
           <Link to={`/export/${project.id}`}
@@ -244,13 +271,22 @@ export function DesignStudio() {
               <img src={chosen.output_image_url + '?t=' + new Date(chosen.created_at).getTime()}
                 alt="Selected design" className="max-w-full max-h-full object-contain rounded-2xl shadow-xl bg-white" />
             ) : generating ? (
-              <div className="text-center space-y-4 max-w-sm">
-                <div className="relative w-24 h-24 mx-auto">
-                  <div className="absolute inset-0 border-4 border-surface-container-high rounded-full" />
-                  <div className="absolute inset-0 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+              <div className="w-full max-w-sm space-y-5">
+                <div className="text-center space-y-1">
+                  <h2 className="font-headline font-black text-xl">Generating…</h2>
+                  <p className="text-on-surface-variant text-sm">First generation can take a couple of minutes.</p>
                 </div>
-                <h2 className="font-headline font-black text-xl">Generating…</h2>
-                <p className="text-on-surface-variant text-sm">First generation can take a couple of minutes.</p>
+                <div className="space-y-2">
+                  <div className="h-2 bg-surface-container-high rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-primary rounded-full transition-[width] duration-500"
+                      style={{ width: `${Math.max(progress, Math.min(95, elapsed * 1.2))}%` }} />
+                  </div>
+                  <div className="flex justify-between font-label text-[10px] uppercase tracking-widest text-on-surface-variant">
+                    <span>{progress > 0 ? `${progress}%` : 'Warming up'}</span>
+                    <span>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</span>
+                  </div>
+                </div>
               </div>
             ) : concepts.length > 0 ? (
               <div className="text-center text-on-surface-variant">
@@ -344,12 +380,26 @@ export function DesignStudio() {
           </div>
 
           <div className="p-4 border-t border-outline-variant/10">
-            <form onSubmit={(e) => { e.preventDefault(); handleSendChat(); }} className="flex gap-2">
-              <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} disabled={busy || !chosen}
-                placeholder={chosen ? 'Describe your edit…' : 'Pick a concept first'}
-                className="flex-1 bg-surface-container-lowest border border-outline-variant/20 rounded-2xl px-5 py-3 text-sm focus:ring-2 focus:ring-primary/40 focus:border-primary disabled:opacity-50 placeholder:text-outline-variant" />
+            <form onSubmit={(e) => { e.preventDefault(); handleSendChat(); }} className="flex gap-2 items-end">
+              <textarea ref={chatInputRef} value={chatInput} rows={1}
+                onChange={(e) => {
+                  setChatInput(e.target.value);
+                  // Auto-grow up to ~3 lines.
+                  const el = e.target as HTMLTextAreaElement;
+                  el.style.height = 'auto';
+                  el.style.height = Math.min(el.scrollHeight, 96) + 'px';
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendChat();
+                  }
+                }}
+                disabled={busy || !chosen}
+                placeholder={chosen ? 'Describe your edit (Shift+Enter for newline)' : 'Pick a concept first'}
+                className="flex-1 bg-surface-container-lowest border border-outline-variant/20 rounded-2xl px-5 py-3 text-sm focus:ring-2 focus:ring-primary/40 focus:border-primary disabled:opacity-50 placeholder:text-outline-variant resize-none leading-relaxed" />
               <button type="submit" disabled={busy || !chatInput.trim() || !chosen}
-                className="bg-primary text-on-primary w-11 h-11 rounded-2xl flex items-center justify-center disabled:opacity-50 active:scale-90 transition-all shadow-lg shadow-primary/20"
+                className="bg-primary text-on-primary w-11 h-11 rounded-2xl flex items-center justify-center disabled:opacity-50 active:scale-90 transition-all shadow-lg shadow-primary/20 flex-shrink-0"
                 aria-label="Send edit">
                 <Icon name="send" className="text-lg" />
               </button>
@@ -357,6 +407,27 @@ export function DesignStudio() {
           </div>
         </div>
       </div>
+
+      {confirmRegenerate && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfirmRegenerate(false)}>
+          <div className="bg-surface-container-lowest rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-headline font-bold text-lg">Regenerate concepts?</h3>
+            <p className="text-on-surface-variant text-sm">
+              The current concepts and edit history will be replaced. This can&apos;t be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setConfirmRegenerate(false)}
+                className="px-5 py-2.5 rounded-xl font-headline font-bold text-sm bg-surface-container-high">
+                Cancel
+              </button>
+              <button onClick={handleRegenerate}
+                className="px-5 py-2.5 rounded-xl font-headline font-bold text-sm bg-primary-container text-on-primary-container">
+                Regenerate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

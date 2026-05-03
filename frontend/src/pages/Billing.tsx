@@ -4,10 +4,19 @@ import { useAuthStore } from '../store/authStore';
 import { Icon } from '../components/Icon';
 import { usePageTitle } from '../hooks/usePageTitle';
 
-const BUNDLES = [
+const BUNDLES: Array<{
+  id: string;
+  name: string;
+  desc: string;
+  price: string;
+  credits: number;
+  icon: string;
+  featured?: boolean;
+  badge?: string;
+}> = [
   { id: 'starter', name: 'Starter Pack', desc: 'Quick one-off designs.', price: '$1.00', credits: 20, icon: 'bolt' },
-  { id: 'popular', name: 'Popular Pack', desc: 'Sweet spot for active designers.', price: '$5.00', credits: 120, icon: 'stars', featured: true },
-  { id: 'pro', name: 'Pro Pack', desc: 'High-volume production.', price: '$10.00', credits: 260, icon: 'diamond' },
+  { id: 'popular', name: 'Popular Pack', desc: 'Sweet spot for active designers.', price: '$5.00', credits: 120, icon: 'stars', featured: true, badge: 'Most popular' },
+  { id: 'pro', name: 'Pro Pack', desc: 'High-volume production.', price: '$10.00', credits: 260, icon: 'diamond', badge: 'Best value' },
 ];
 
 export function Billing() {
@@ -57,7 +66,12 @@ export function Billing() {
 
       <section className="grid grid-cols-1 sm:grid-cols-3 gap-5">
         {BUNDLES.map((b) => (
-          <div key={b.id} className={`bg-surface-container-lowest p-6 rounded-3xl border ${b.featured ? 'border-primary shadow-xl' : 'border-outline-variant/10'} flex flex-col`}>
+          <div key={b.id} className={`relative bg-surface-container-lowest p-6 rounded-3xl border ${b.featured ? 'border-primary shadow-xl' : 'border-outline-variant/10'} flex flex-col`}>
+            {b.badge && (
+              <span className={`absolute -top-2.5 right-4 px-3 py-1 rounded-full font-label text-[10px] uppercase font-bold tracking-widest ${
+                b.featured ? 'bg-primary text-on-primary' : 'bg-on-surface text-surface'
+              }`}>{b.badge}</span>
+            )}
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-xl bg-primary-container/30 flex items-center justify-center">
                 <Icon name={b.icon} className="text-primary text-2xl" />

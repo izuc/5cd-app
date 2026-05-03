@@ -4,12 +4,64 @@ import { api } from '../api/client';
 import { Icon } from '../components/Icon';
 import { usePageTitle } from '../hooks/usePageTitle';
 
-const TYPE_OPTIONS = [
-  { value: 'logo', label: 'Logo', placeholder: 'A modern coffee shop logo, steaming cup, earth tones, minimalist...' },
-  { value: 'social', label: 'Social Post', placeholder: 'Promo post for a sneaker drop, neon palette, urban vibe...' },
-  { value: 'banner', label: 'Banner', placeholder: 'Wide banner for a yoga studio, calm pastel, sunrise...' },
-  { value: 'flyer', label: 'Flyer', placeholder: 'Concert flyer, bold typography, retro 70s feel...' },
-  { value: 'custom', label: 'Custom Prompt', placeholder: 'Whatever you want — full control over the prompt...' },
+interface TypeOption {
+  value: string;
+  label: string;
+  placeholder: string;
+  examples: string[];
+}
+
+const TYPE_OPTIONS: TypeOption[] = [
+  {
+    value: 'logo',
+    label: 'Logo',
+    placeholder: 'A modern coffee shop logo, steaming cup, earth tones, minimalist...',
+    examples: [
+      'A minimalist coffee cup logo, cream background, vector style',
+      'Geometric mountain peak, monoline, deep navy on warm white',
+      'Fox illustration, friendly and rounded, two-tone orange',
+    ],
+  },
+  {
+    value: 'social',
+    label: 'Social Post',
+    placeholder: 'Promo post for a sneaker drop, neon palette, urban vibe...',
+    examples: [
+      'Sneaker drop announcement, neon gradient, bold sans serif',
+      'Quote card, calm pastel background, serif typography',
+      'Product launch, dark mode, glowing accent on a single object',
+    ],
+  },
+  {
+    value: 'banner',
+    label: 'Banner',
+    placeholder: 'Wide banner for a yoga studio, calm pastel, sunrise...',
+    examples: [
+      'Yoga studio header, sunrise gradient, soft photography',
+      'Conference website banner, abstract waves, primary blue',
+      'Restaurant banner, warm earth tones, hand-drawn ingredients',
+    ],
+  },
+  {
+    value: 'flyer',
+    label: 'Flyer',
+    placeholder: 'Concert flyer, bold typography, retro 70s feel...',
+    examples: [
+      'Concert flyer, bold typography, retro 70s palette',
+      'Farmers market flyer, vintage poster, warm cream',
+      'Workshop announcement, brutalist black and white grid',
+    ],
+  },
+  {
+    value: 'custom',
+    label: 'Custom Prompt',
+    placeholder: 'Whatever you want — full control over the prompt...',
+    examples: [
+      'A surreal portrait of a fox astronaut on a moonlit cliff',
+      'Editorial magazine cover, big serif title, single hero photo',
+      'Isometric scene of a tiny floating island with a lighthouse',
+    ],
+  },
 ];
 
 const SIZE_OPTIONS = [
@@ -18,6 +70,8 @@ const SIZE_OPTIONS = [
   { value: '768x1024',  label: 'Portrait 3:4',      w: 768,  h: 1024 },
   { value: '1280x720',  label: 'Wide 16:9',         w: 1280, h: 720 },
 ];
+
+const STEPS = 50; // Model was trained on 50 steps; keep it fixed for predictable quality.
 
 export function CreateDesign() {
   const [searchParams] = useSearchParams();
@@ -28,12 +82,12 @@ export function CreateDesign() {
   const [type, setType] = useState(initialType);
   const [description, setDescription] = useState('');
   const [size, setSize] = useState('1024x1024');
-  const [steps, setSteps] = useState(25);
   const [numConcepts, setNumConcepts] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const sizePreset = SIZE_OPTIONS.find((s) => s.value === size) || SIZE_OPTIONS[0];
+  const typeOption = TYPE_OPTIONS.find((t) => t.value === type) || TYPE_OPTIONS[0];
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -48,7 +102,7 @@ export function CreateDesign() {
           description,
           size,
           numConcepts,
-          steps,
+          steps: STEPS,
           width: sizePreset.w,
           height: sizePreset.h,
         },
@@ -60,8 +114,6 @@ export function CreateDesign() {
       setLoading(false);
     }
   };
-
-  const placeholder = TYPE_OPTIONS.find((t) => t.value === type)?.placeholder || '';
 
   return (
     <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 sm:py-16">
@@ -95,13 +147,27 @@ export function CreateDesign() {
         </div>
 
         <div className="space-y-2">
-          <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Prompt</label>
+          <div className="flex items-baseline justify-between px-1">
+            <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold">Prompt</label>
+            <span className={`font-label text-[10px] uppercase tracking-widest ${description.length > 30 ? 'text-on-surface-variant' : 'text-outline-variant'}`}>
+              {description.length} chars
+            </span>
+          </div>
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} required disabled={loading}
             className="w-full bg-surface-container-lowest border-2 border-surface-container-high rounded-2xl p-5 focus:ring-2 focus:ring-primary/40 focus:border-primary text-on-surface font-medium placeholder:text-outline-variant transition-all text-base resize-none disabled:opacity-60"
-            placeholder={placeholder} />
+            placeholder={typeOption.placeholder} />
+          <div className="flex flex-wrap gap-2 pt-1">
+            <span className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant px-1 py-1">Try:</span>
+            {typeOption.examples.map((ex) => (
+              <button key={ex} type="button" onClick={() => setDescription(ex)}
+                className="text-xs text-left px-3 py-1.5 rounded-full bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors max-w-full truncate">
+                {ex}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-2">
             <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Size</label>
             <select value={size} onChange={(e) => setSize(e.target.value)}
@@ -124,21 +190,16 @@ export function CreateDesign() {
               ))}
             </div>
           </div>
-          <div className="space-y-2">
-            <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Steps ({steps})</label>
-            <input type="range" min={10} max={50} step={1} value={steps} onChange={(e) => setSteps(parseInt(e.target.value))}
-              className="w-full h-12 accent-primary" aria-label="Sampling steps" />
-          </div>
         </div>
 
         <button type="submit" disabled={loading || !description.trim()}
-          className="w-full bg-primary-container py-5 sm:py-6 rounded-2xl font-headline text-xl sm:text-2xl font-black text-on-primary-container shadow-[0_24px_48px_-12px] shadow-primary-container/40 hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-4 disabled:opacity-50">
-          {loading ? 'Creating...' : `Generate ${numConcepts} ${numConcepts === 1 ? 'Design' : 'Concepts'}`}
-          <Icon name="auto_awesome" className="text-2xl sm:text-3xl" />
+          className="w-full bg-primary-container py-4 rounded-2xl font-headline text-lg font-black text-on-primary-container shadow-[0_18px_32px_-12px] shadow-primary-container/40 hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-50">
+          {loading ? 'Creating…' : `Generate ${numConcepts} ${numConcepts === 1 ? 'Design' : 'Concepts'}`}
+          <Icon name="auto_awesome" className="text-xl" />
         </button>
 
         <p className="text-center text-xs text-on-surface-variant">
-          Output will be {sizePreset.w} × {sizePreset.h}, {steps} sampling steps.
+          Output will be {sizePreset.w} × {sizePreset.h}.
         </p>
       </form>
     </main>

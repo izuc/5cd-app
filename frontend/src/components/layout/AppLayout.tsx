@@ -1,4 +1,4 @@
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import { Header } from './Header';
 import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
@@ -6,12 +6,13 @@ import { useAuthStore } from '../../store/authStore';
 
 export function AppLayout() {
   const { user } = useAuthStore();
+  const location = useLocation();
 
   if (!user) {
     return (
       <>
         <Header />
-        <Outlet />
+        <div key={location.pathname} className="route-fade"><Outlet /></div>
       </>
     );
   }
@@ -21,7 +22,7 @@ export function AppLayout() {
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <Header />
-        <main className="flex-1 flex flex-col overflow-auto pb-20 lg:pb-0">
+        <main key={location.pathname} className="route-fade flex-1 flex flex-col overflow-auto pb-20 lg:pb-0">
           <Outlet />
         </main>
       </div>
@@ -31,10 +32,11 @@ export function AppLayout() {
 }
 
 export function PublicLayout() {
+  const location = useLocation();
   return (
     <>
       <Header />
-      <Outlet />
+      <div key={location.pathname} className="route-fade"><Outlet /></div>
     </>
   );
 }

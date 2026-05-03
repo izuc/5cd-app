@@ -24,21 +24,9 @@ export function Header() {
     <>
       <header className="bg-surface/80 backdrop-blur-xl sticky top-0 z-50 shadow-[0_20px_40px_rgba(30,30,30,0.06)]">
         <div className="flex justify-between items-center w-full px-4 sm:px-6 py-3 sm:py-4 max-w-[1920px] mx-auto relative">
-          <div className="flex items-center gap-4 sm:gap-8">
-            <Link to={user ? '/dashboard' : '/'} className="text-2xl font-black text-on-surface tracking-tighter font-headline">
-              5cd
-            </Link>
-            {user && (
-              <nav className="hidden md:flex items-center gap-6">
-                <Link to="/dashboard" className="text-on-surface font-medium font-headline tracking-tight hover:text-primary transition-colors duration-200">
-                  My Designs
-                </Link>
-                <Link to="/create" className="text-on-surface-variant font-medium font-headline tracking-tight hover:text-primary transition-colors duration-200">
-                  New Design
-                </Link>
-              </nav>
-            )}
-          </div>
+          <Link to={user ? '/dashboard' : '/'} className="text-2xl font-black text-on-surface tracking-tighter font-headline">
+            5cd
+          </Link>
 
           <div className="flex items-center gap-2 sm:gap-4">
             {user ? (

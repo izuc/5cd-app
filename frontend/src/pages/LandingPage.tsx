@@ -14,33 +14,42 @@ export function LandingPage() {
               Generate a polished design in one shot, then chat to refine it. One unified model handles both
               text-to-image and image edits — no layer juggling needed.
             </p>
-            <div className="flex flex-wrap gap-4 pt-4">
+            <div className="flex flex-wrap items-center gap-6 pt-4">
               <Link to="/register" className="bg-primary-container text-on-primary-container px-8 py-4 rounded-xl font-headline font-bold text-lg shadow-xl shadow-primary-container/20 hover:scale-105 active:scale-95 transition-all">
                 Start Designing
               </Link>
-              <a href="#how-it-works" className="bg-surface-container-lowest text-on-surface px-8 py-4 rounded-xl font-headline font-bold text-lg border border-outline-variant/15 hover:bg-surface-container-low transition-colors">
-                How It Works
+              <a href="#how-it-works" className="text-on-surface-variant font-medium hover:text-on-surface transition-colors inline-flex items-center gap-1.5 group">
+                How it works
+                <Icon name="arrow_forward" className="text-base group-hover:translate-x-0.5 transition-transform" />
               </a>
             </div>
           </div>
           <div className="lg:col-span-5 relative hidden sm:block">
-            <div className="relative w-full aspect-square bg-surface-container-low rounded-3xl overflow-hidden shadow-2xl">
-              <div className="absolute inset-0 p-8 flex flex-col items-center justify-center gap-6">
-                <div className="w-full max-w-xs aspect-square rounded-2xl bg-white shadow-xl border border-outline-variant/10 flex items-center justify-center">
-                  <div className="text-center space-y-3">
-                    <Icon name="auto_awesome" className="text-6xl text-primary" />
-                    <p className="font-headline font-bold text-on-surface-variant text-sm">AI-Generated Design</p>
-                  </div>
+            <div className="grid grid-cols-2 gap-4 [transform:rotate(-3deg)]">
+              <div className="aspect-square rounded-3xl overflow-hidden bg-white shadow-2xl border border-outline-variant/10 -translate-y-4">
+                <img src="/showcase/coffee-logo.png" alt="" className="w-full h-full object-cover" />
+              </div>
+              <div className="aspect-square rounded-3xl overflow-hidden shadow-2xl bg-gradient-to-br from-secondary to-secondary-dim flex flex-col justify-between p-6 translate-y-6">
+                <div className="font-label text-[10px] uppercase tracking-widest text-on-secondary/80">Drop · 04</div>
+                <div className="font-headline font-black text-on-secondary text-2xl leading-none tracking-tight">
+                  Sneaker<br />Season
                 </div>
-                <div className="flex gap-3">
-                  {['edit', 'palette', 'chat', 'download'].map((icon) => (
-                    <div key={icon} className="w-12 h-12 rounded-xl bg-surface-container-lowest shadow-lg border border-outline-variant/10 flex items-center justify-center">
-                      <Icon name={icon} className="text-on-surface-variant" />
-                    </div>
-                  ))}
+                <div className="self-end w-10 h-10 rounded-full bg-on-secondary/15 backdrop-blur flex items-center justify-center">
+                  <Icon name="arrow_outward" className="text-on-secondary text-lg" />
                 </div>
               </div>
+              <div className="aspect-square rounded-3xl overflow-hidden shadow-2xl bg-on-surface flex flex-col justify-between p-6 -translate-y-2">
+                <div className="font-headline font-black text-surface text-3xl leading-[0.9] tracking-tighter">
+                  Yoga<br /><span className="italic font-medium text-primary-fixed">at sunrise</span>
+                </div>
+                <div className="font-label text-[10px] uppercase tracking-widest text-surface/60">May 18 · 6am</div>
+              </div>
+              <div className="aspect-square rounded-3xl overflow-hidden shadow-2xl bg-tertiary-container flex flex-col items-center justify-center text-center p-6 translate-y-8">
+                <div className="font-headline font-black text-on-tertiary-container text-5xl tracking-tighter leading-none">70%</div>
+                <div className="font-label text-[10px] uppercase tracking-[0.3em] text-on-tertiary-container/80 mt-2">Spring sale</div>
+              </div>
             </div>
+            <div className="absolute -inset-8 -z-10 bg-gradient-to-br from-primary-container/30 via-transparent to-secondary-container/20 blur-3xl" />
           </div>
         </div>
       </section>
@@ -80,7 +89,7 @@ export function LandingPage() {
             { num: '03', title: 'Chat & Export', desc: 'Refine via the chat sidebar, then export PNG / JPG / PDF.', hoverBg: 'group-hover:bg-tertiary-container', hoverText: 'group-hover:text-on-tertiary-container' },
           ].map((step) => (
             <div key={step.num} className={`bg-surface-container-lowest p-8 rounded-3xl border border-outline-variant/5 ${step.hoverBg} group transition-colors cursor-default`}>
-              <p className={`font-headline font-black text-6xl text-surface-variant ${step.hoverText}/20 mb-8`}>{step.num}</p>
+              <p className="font-headline font-black text-6xl text-on-surface/15 group-hover:text-on-surface/30 transition-colors mb-8">{step.num}</p>
               <h3 className={`font-headline text-2xl font-extrabold mb-4 ${step.hoverText}`}>{step.title}</h3>
               <p className={`text-on-surface-variant ${step.hoverText}/80 leading-relaxed`}>{step.desc}</p>
             </div>

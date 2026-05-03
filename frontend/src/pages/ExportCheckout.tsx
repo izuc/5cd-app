@@ -65,9 +65,9 @@ export function ExportCheckout() {
           </Link>
           <div className="bg-surface-container-lowest rounded-2xl p-6 border border-outline-variant/10">
             <h2 className="font-headline text-xl font-bold tracking-tight mb-4">Preview</h2>
-            <div className="aspect-square bg-surface-container-low rounded-xl overflow-hidden flex items-center justify-center">
+            <div className="bg-surface-container-low rounded-xl overflow-hidden flex items-center justify-center min-h-[180px] canvas-checkerboard">
               {previewUrl
-                ? <img src={previewUrl} alt="Design preview" className="w-full h-full object-cover" />
+                ? <img src={previewUrl} alt="Design preview" className="max-w-full max-h-[420px] object-contain" />
                 : <Icon name="hourglass_empty" className="text-5xl text-outline-variant/40" />}
             </div>
             {project && (
@@ -110,12 +110,17 @@ export function ExportCheckout() {
           {exportResult ? (
             <div className="bg-surface-container-lowest rounded-2xl p-6 space-y-4">
               <div className="flex items-center gap-3">
-                <Icon name="check_circle" className="text-3xl text-primary" />
+                <Icon name="check_circle" className="text-3xl text-primary" filled />
                 <div>
                   <h3 className="font-headline font-bold text-lg">Export ready</h3>
                   <p className="text-sm text-on-surface-variant">Your file is saved to your account.</p>
                 </div>
               </div>
+              {exportResult.file_url && (exportResult.format === 'png' || exportResult.format === 'jpg' || exportResult.format === 'transparent_png') && (
+                <div className="canvas-checkerboard rounded-xl overflow-hidden flex items-center justify-center p-2">
+                  <img src={exportResult.file_url} alt="Exported design" className="max-w-full max-h-64 object-contain" />
+                </div>
+              )}
               <button onClick={handleDownload} className="w-full bg-primary-container text-on-primary-container py-4 rounded-xl font-headline font-bold text-base hover:scale-[1.01] transition-transform flex items-center justify-center gap-2">
                 <Icon name="download" /> Download {selectedOption.label}
               </button>

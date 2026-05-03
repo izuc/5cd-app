@@ -3,7 +3,7 @@ import { Icon } from '../Icon';
 
 const NAV_ITEMS = [
   { path: '/dashboard', icon: 'folder_open', label: 'Designs' },
-  { path: '/create', icon: 'add', label: 'Create', isCreate: true },
+  { path: '/create', icon: 'auto_awesome', label: 'Create', isCreate: true },
   { path: '/billing', icon: 'payments', label: 'Billing' },
   { path: '/settings', icon: 'settings', label: 'Settings' },
 ];
@@ -18,14 +18,16 @@ export function MobileNav() {
         if (item.isCreate) {
           return (
             <div key={item.label} className="relative -top-5">
-              <Link to={item.path} className="w-14 h-14 bg-primary-container rounded-full shadow-2xl flex items-center justify-center text-on-primary-container">
-                <Icon name="add" className="text-3xl" />
+              <Link to={item.path} aria-label="New design"
+                className="w-14 h-14 bg-primary-container rounded-full shadow-2xl flex items-center justify-center text-on-primary-container hover:scale-105 active:scale-95 transition-transform">
+                <Icon name="auto_awesome" filled className="text-2xl" />
               </Link>
             </div>
           );
         }
         return (
-          <Link key={item.label} to={item.path} className={`flex flex-col items-center gap-1 ${isActive ? 'text-primary' : 'text-on-surface-variant'}`}>
+          <Link key={item.label} to={item.path} aria-current={isActive ? 'page' : undefined}
+            className={`flex flex-col items-center gap-1 ${isActive ? 'text-primary' : 'text-on-surface-variant'}`}>
             <Icon name={item.icon} filled={isActive} />
             <span className="text-[10px] font-label font-bold">{item.label}</span>
           </Link>
