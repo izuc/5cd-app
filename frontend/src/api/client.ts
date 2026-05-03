@@ -70,7 +70,7 @@ export const api = {
   deleteProject: (id: number) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
 
   // -- Generation ----------------------------------------------------
-  generate: (projectId: number, opts: { prompt?: string; num_concepts?: number; width?: number; height?: number; steps?: number } = {}) =>
+  generate: (projectId: number, opts: { prompt?: string; num_concepts?: number; width?: number; height?: number; steps?: number; enhance?: boolean } = {}) =>
     request<{ job_id: string; status: string }>(`/projects/${projectId}/generate`, { method: 'POST', body: JSON.stringify(opts) }),
   edit: (projectId: number, prompt: string, imageUrl?: string, opts: { steps?: number; cfg_scale?: number } = {}) =>
     request<{ job_id: string; status: string; kind: string }>(`/projects/${projectId}/edit`, {

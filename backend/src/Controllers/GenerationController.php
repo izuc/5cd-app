@@ -43,6 +43,8 @@ class GenerationController
             'steps' => (int) ($data['steps'] ?? 50),
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
+            'enhance' => (bool) ($data['enhance'] ?? $config['enhance'] ?? false),
+            'design_type' => $project['type'] ?: null,
         ];
 
         $jobId = $this->aiPostAsync('/api/generate/async', $payload);

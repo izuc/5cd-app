@@ -261,13 +261,104 @@ def _set_gguf_into_meta_model(meta_model, state_dict, dtype, device) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Prompt enhancement (uses the local model — no external API)
+# ---------------------------------------------------------------------------
+# Per-design-type system prompts for in-process prompt expansion. The upstream
+# `PromptEnhancer` only ships an "infographic" template which doesn't suit
+# logos / banners / flyers, so we author our own and call the SenseNova-U1
+# language model directly via `model.language_model.generate(...)`.
+_ENHANCE_SYSTEM_PROMPTS: dict[str, str] = {
+    "logo": (
+        "You are a senior brand designer writing prompts for a text-to-image model. "
+        "Expand the user's idea into one tightly-written paragraph (60-100 words) that describes "
+        "a single logo composition: subject, silhouette, color palette (2-3 colors named), "
+        "line weight, geometry, background, and overall feeling. Logos are SIMPLE — no scenes, "
+        "no busy backgrounds, no text unless the user specifically asked for a wordmark. "
+        "Output only the prompt itself with no preamble, no headings, no quotes."
+    ),
+    "social": (
+        "You are an art director for a brand social-media account writing prompts for a "
+        "text-to-image model. Expand the user's idea into one paragraph (80-130 words) describing "
+        "a single eye-catching square social post: hero subject, color palette, layout (where "
+        "the focal point sits), typography style if text appears, lighting, and mood. Quote any "
+        "text that should appear in the image. Output only the prompt itself with no preamble."
+    ),
+    "banner": (
+        "You are a senior web designer writing prompts for a text-to-image model. Expand the "
+        "user's idea into one paragraph (80-130 words) describing a wide hero banner: hero "
+        "subject placement (left / center / right), background atmosphere, color palette, "
+        "lighting, depth, and any typography (quote the actual text). Banners reward clear "
+        "negative space for headlines. Output only the prompt itself with no preamble."
+    ),
+    "flyer": (
+        "You are a print designer writing prompts for a text-to-image model. Expand the user's "
+        "idea into one paragraph (100-150 words) describing a single flyer: layout (header, "
+        "hero, body, footer), typography hierarchy, color palette, illustration / photography "
+        "style, and any quoted text that should appear. Be specific about font character "
+        "(e.g. condensed grotesk, fat serif, hand-painted brush). Output only the prompt itself."
+    ),
+    "custom": (
+        "You are an experienced art director writing prompts for a text-to-image model. "
+        "Expand the user's idea into one paragraph (80-150 words) describing a single image: "
+        "subject, composition, color palette (named, 2-4 colors), lighting, materials and "
+        "textures, and overall mood. Quote any text that should appear. Output only the prompt "
+        "itself with no preamble, no headings, no quotes around the whole thing."
+    ),
+}
+
+
+def _run_enhance(prompt: str, design_type: str | None = None) -> str:
+    """Expand a short user prompt into a detailed brief for the T2I model.
+
+    Uses the loaded SenseNova-U1 language model standalone (text-only path) —
+    no external API. Returns the expanded prompt; on any failure returns the
+    original prompt so generation still proceeds.
+    """
+    model = _pipeline["model"]
+    device = _pipeline["device"]
+    system_prompt = _ENHANCE_SYSTEM_PROMPTS.get((design_type or "custom").lower(),
+                                                _ENHANCE_SYSTEM_PROMPTS["custom"])
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = _tokenizer(text, return_tensors="pt").to(device)
+    eos_id = _tokenizer.eos_token_id
+    pad_id = _tokenizer.pad_token_id if _tokenizer.pad_token_id is not None else eos_id
+    with _torch.inference_mode():
+        output = model.language_model.generate(
+            input_ids=inputs.input_ids,
+            attention_mask=inputs.attention_mask,
+            max_new_tokens=400,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.95,
+            top_k=20,
+            repetition_penalty=1.05,
+            eos_token_id=eos_id,
+            pad_token_id=pad_id,
+        )
+    expanded = _tokenizer.decode(
+        output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
+    ).strip()
+    # Strip any wrapping quotes / "Prompt:" prefixes the model might emit.
+    for prefix in ("Prompt:", "prompt:", "PROMPT:"):
+        if expanded.startswith(prefix):
+            expanded = expanded[len(prefix):].strip()
+    if expanded.startswith('"') and expanded.endswith('"'):
+        expanded = expanded[1:-1].strip()
+    return expanded or prompt
+
+
+# ---------------------------------------------------------------------------
 # Diffusion calls (real model path)
 # ---------------------------------------------------------------------------
 def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: float,
-             seed: int, batch_size: int) -> list[Image.Image]:
+             seed: int, batch_size: int, think_mode: bool = True) -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
     with _torch.inference_mode():
-        tensor = model.t2i_generate(
+        out = model.t2i_generate(
             _tokenizer,
             prompt,
             image_size=(width, height),
@@ -278,16 +369,19 @@ def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: flo
             num_steps=steps,
             batch_size=batch_size,
             seed=seed,
-            think_mode=False,
+            think_mode=think_mode,
         )
-    return _denorm_to_pil(tensor)
+    # think_mode=True returns (tensor, think_text); otherwise just tensor.
+    tensor, think_text = out if think_mode else (out, "")
+    return _denorm_to_pil(tensor), think_text
 
 
 def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: int, *,
-              steps: int, cfg_scale: float, img_cfg_scale: float, seed: int) -> list[Image.Image]:
+              steps: int, cfg_scale: float, img_cfg_scale: float, seed: int,
+              think_mode: bool = True) -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
     with _torch.inference_mode():
-        tensor = model.it2i_generate(
+        out = model.it2i_generate(
             _tokenizer,
             prompt,
             ref_images,
@@ -300,8 +394,10 @@ def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: in
             num_steps=steps,
             batch_size=1,
             seed=seed,
+            think_mode=think_mode,
         )
-    return _denorm_to_pil(tensor)
+    tensor, think_text = out if think_mode else (out, "")
+    return _denorm_to_pil(tensor), think_text
 
 
 # ---------------------------------------------------------------------------
@@ -434,25 +530,41 @@ def _b64_to_pil(b64: str) -> Image.Image:
 # ---------------------------------------------------------------------------
 def _process_generate(job: Job) -> None:
     p = job.params
-    prompt = (p.get("prompt") or "").strip() or "Untitled design"
+    raw_prompt = (p.get("prompt") or "").strip() or "Untitled design"
     num = max(1, min(int(p.get("num_concepts", 1)), 6))
     width = _round_to_grid(int(p.get("width", DEFAULT_WIDTH)))
     height = _round_to_grid(int(p.get("height", DEFAULT_HEIGHT)))
     steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 100))
     cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE))
+    enhance = bool(p.get("enhance"))
+    design_type = p.get("design_type")
     base_seed = p.get("seed")
     if base_seed is None:
         base_seed = random.randint(0, 2**31 - 1)
 
     have_model = _load_pipeline()
+
+    # Optionally expand the short user prompt into a full design brief first.
+    enhanced_prompt = ""
+    prompt = raw_prompt
+    if enhance and have_model:
+        try:
+            enhanced_prompt = _run_enhance(raw_prompt, design_type)
+            prompt = enhanced_prompt
+            print(f"[ai] {job.id} enhanced: {raw_prompt!r} -> {enhanced_prompt[:120]!r}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[ai] {job.id} enhance failed, falling back: {e}")
+            enhanced_prompt = ""
+
     images_b64: list[str] = []
+    think_texts: list[str] = []
 
     for i in range(num):
         seed = int(base_seed) + i
         if have_model:
             try:
-                pil = _run_t2i(prompt, width, height,
-                               steps=steps, cfg_scale=cfg, seed=seed, batch_size=1)
+                pil, think_text = _run_t2i(prompt, width, height,
+                                           steps=steps, cfg_scale=cfg, seed=seed, batch_size=1)
                 img = pil[0]
             except Exception as e:  # noqa: BLE001
                 # Mark the model unhealthy and fall back for the rest of this batch.
@@ -461,13 +573,18 @@ def _process_generate(job: Job) -> None:
                 _pipeline = None
                 have_model = False
                 img = _placeholder_image(prompt, width, height, seed)
+                think_text = ""
         else:
             img = _placeholder_image(prompt, width, height, seed)
+            think_text = ""
         images_b64.append(_pil_to_b64(img))
+        think_texts.append(think_text)
         job.progress = int(((i + 1) / num) * 100)
 
     job.result = {
         "images": images_b64,
+        "think": think_texts,
+        "enhanced_prompt": enhanced_prompt,
         "model": "sensenova-u1" if have_model else "placeholder",
         "width": width,
         "height": height,
@@ -497,10 +614,11 @@ def _process_edit(job: Job) -> None:
         seed = random.randint(0, 2**31 - 1)
 
     have_model = _load_pipeline()
+    think_text = ""
     if have_model:
         try:
-            pil = _run_edit(prompt, refs, width, height,
-                            steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg, seed=int(seed))
+            pil, think_text = _run_edit(prompt, refs, width, height,
+                                        steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg, seed=int(seed))
             img = pil[0]
         except Exception as e:  # noqa: BLE001
             global _pipeline, _pipeline_error
@@ -519,6 +637,7 @@ def _process_edit(job: Job) -> None:
     job.progress = 100
     job.result = {
         "images": [_pil_to_b64(img)],
+        "think": [think_text],
         "model": "sensenova-u1" if have_model else "placeholder",
         "width": width,
         "height": height,
@@ -526,6 +645,92 @@ def _process_edit(job: Job) -> None:
         "cfg_scale": cfg,
         "placeholder": not have_model,
         "error": _pipeline_error if not have_model else "",
+    }
+
+
+def _process_chat(job: Job) -> None:
+    """Generate a text response. If a reference image is supplied the model uses
+    visual understanding (image + question -> text); otherwise it runs the
+    underlying language model standalone (pure text-to-text)."""
+    p = job.params
+    prompt = (p.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("chat job requires a prompt")
+    ref_b64 = p.get("ref_image")
+    # Cap default at 512 tokens — a chat reply, not an essay. Users can opt into more.
+    max_new = max(1, min(int(p.get("max_new_tokens") or 512), 8192))
+    temperature = float(p.get("temperature") or 0.6)
+    top_p = float(p.get("top_p") or 0.95)
+    top_k = int(p.get("top_k") or 20)
+    rep_pen = float(p.get("repetition_penalty") or 1.05)
+
+    have_model = _load_pipeline()
+    if not have_model:
+        job.result = {
+            "text": "Model is not available right now. Try again shortly.",
+            "model": "placeholder",
+            "placeholder": True,
+            "error": _pipeline_error,
+        }
+        return
+
+    model = _pipeline["model"]
+    device = _pipeline["device"]
+
+    gen_kwargs = dict(
+        max_new_tokens=max_new,
+        do_sample=True,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=rep_pen,
+    )
+
+    try:
+        with _torch.inference_mode():
+            if ref_b64:
+                # Visual understanding path — give the model the image as context.
+                from sensenova_u1.models.neo_unify.utils import load_image_native
+                img = _b64_to_pil(ref_b64)
+                pixel_values, grid_hw = load_image_native(img)
+                pixel_values = pixel_values.to(device, dtype=_pipeline["dtype"])
+                grid_hw = grid_hw.to(device)
+                response, _hist = model.chat(
+                    _tokenizer, pixel_values, prompt, gen_kwargs,
+                    return_history=True, grid_hw=grid_hw,
+                )
+            else:
+                # Pure text-to-text — call the underlying Qwen3 LLM directly.
+                # Pass attention_mask explicitly and use a distinct pad_token so the
+                # generation can stop on EOS instead of running to max_new_tokens.
+                messages = [{"role": "user", "content": prompt}]
+                text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = _tokenizer(text, return_tensors="pt").to(device)
+                eos_id = _tokenizer.eos_token_id
+                pad_id = _tokenizer.pad_token_id if _tokenizer.pad_token_id is not None else eos_id
+                output = model.language_model.generate(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    eos_token_id=eos_id,
+                    pad_token_id=pad_id,
+                    **gen_kwargs,
+                )
+                response = _tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+    except Exception as e:  # noqa: BLE001
+        job.result = {
+            "text": "",
+            "model": "sensenova-u1",
+            "placeholder": False,
+            "error": f"Chat failed: {e}",
+        }
+        return
+
+    job.result = {
+        "text": response,
+        "model": "sensenova-u1",
+        "with_image": bool(ref_b64),
+        "placeholder": False,
+        "error": "",
     }
 
 
@@ -543,6 +748,8 @@ async def _worker() -> None:
                 await loop.run_in_executor(None, _process_generate, job)
             elif job.type == "edit":
                 await loop.run_in_executor(None, _process_edit, job)
+            elif job.type == "chat":
+                await loop.run_in_executor(None, _process_chat, job)
             else:
                 raise ValueError(f"unknown job type: {job.type}")
             job.status = "completed"
@@ -570,6 +777,8 @@ class GenerateRequest(BaseModel):
     steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
     cfg_scale: float = DEFAULT_CFG_SCALE
     seed: Optional[int] = None
+    enhance: bool = False
+    design_type: Optional[str] = None  # "logo" | "social" | "banner" | "flyer" | "custom"
 
 
 class EditRequest(BaseModel):
@@ -581,6 +790,16 @@ class EditRequest(BaseModel):
     cfg_scale: float = DEFAULT_CFG_SCALE
     img_cfg_scale: float = 1.0
     seed: Optional[int] = None
+
+
+class ChatRequest(BaseModel):
+    prompt: str
+    ref_image: Optional[str] = None    # base64-encoded PNG; when supplied the model uses VQA
+    max_new_tokens: int = Field(512, ge=1, le=8192)
+    temperature: float = 0.6
+    top_p: float = 0.95
+    top_k: int = 20
+    repetition_penalty: float = 1.05
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +883,19 @@ async def api_edit_async(req: EditRequest):
         "status": "queued",
         "queue_position": _queue_position(job.id),
     })
+
+
+@app.post("/api/chat")
+async def api_chat(req: ChatRequest):
+    """Synchronous text chat. With ref_image: visual understanding (image + question -> text).
+    Without: pure text-to-text via the underlying language model."""
+    job = Job("chat", req.model_dump())
+    if not await _enqueue(job):
+        return JSONResponse({"error": "queue full"}, status_code=503)
+    await _wait_for_job(job)
+    if job.status == "failed":
+        return JSONResponse({"error": job.error}, status_code=500)
+    return JSONResponse({"job_id": job.id, **(job.result or {})})
 
 
 @app.get("/api/jobs/{job_id}")

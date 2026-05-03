@@ -89,6 +89,7 @@ export function CreateDesign() {
   const [description, setDescription] = useState('');
   const [size, setSize] = useState('1024x1024');
   const [numConcepts, setNumConcepts] = useState(1);
+  const [enhance, setEnhance] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -108,6 +109,7 @@ export function CreateDesign() {
           description,
           size,
           numConcepts,
+          enhance,
           steps: STEPS,
           width: sizePreset.w,
           height: sizePreset.h,
@@ -197,6 +199,28 @@ export function CreateDesign() {
             </div>
           </div>
         </div>
+
+        <label className={`flex items-start gap-3 p-4 rounded-2xl border-2 cursor-pointer transition-all ${
+          enhance
+            ? 'border-primary bg-primary-container/20'
+            : 'border-surface-container-high bg-surface-container-lowest hover:border-outline-variant'
+        }`}>
+          <input
+            type="checkbox"
+            checked={enhance}
+            onChange={(e) => setEnhance(e.target.checked)}
+            className="mt-0.5 h-5 w-5 accent-primary cursor-pointer"
+          />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-headline font-bold text-sm text-on-surface">Expand my prompt first</span>
+              <Icon name="auto_fix_high" className="text-base text-primary" />
+            </div>
+            <p className="text-xs text-on-surface-variant mt-0.5">
+              The model rewrites your description into a detailed brief before generating. Slower (~10s extra), often sharper composition.
+            </p>
+          </div>
+        </label>
 
         <button type="submit" disabled={loading || !description.trim()}
           className="w-full bg-primary-container py-4 rounded-2xl font-headline text-lg font-black text-on-primary-container shadow-[0_18px_32px_-12px] shadow-primary-container/40 hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-50">
