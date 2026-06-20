@@ -1,16 +1,19 @@
 """
 Download everything needed to run the SenseNova-U1 GGUF locally.
 
-This grabs three sets of files into MODELS_DIR:
+This grabs four sets of files into MODELS_DIR:
   1. The GGUF weights themselves   (smthem/SenseNova-U1-8B-MoT-Merger-gguf)
-  2. The tokenizer + model config  (sensenova/SenseNova-U1-8B-MoT)
-  3. layer_streaming.py            (helper from the GGUF repo for VRAM-efficient inference)
+  2. The 8-step Infographic LoRA   (sensenova/SenseNova-U1-8B-MoT-LoRAs), saved
+                                     locally as LORA_FILE (Infographic-LoRA-8step.safetensors)
+  3. The tokenizer + model config  (sensenova/SenseNova-U1-8B-MoT)
+  4. layer_streaming.py            (helper from the GGUF repo for VRAM-efficient inference)
 
 Usage:
-    python download_model.py                # pull the Q6_K GGUF + config + tokenizer
+    python download_model.py                # pull GGUF + LoRA + config + tokenizer
     python download_model.py --gguf-only    # just the GGUF
+    python download_model.py --lora-only    # just the LoRA
     python download_model.py --config-only  # just the config + tokenizer
-    python download_model.py --list         # list available files in both repos
+    python download_model.py --list         # list available files in all repos
 """
 
 import argparse
@@ -27,6 +30,12 @@ MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(__file__), "mo
 TOKENIZER_REPO = os.getenv("TOKENIZER_REPO", "sensenova/SenseNova-U1-8B-MoT")
 GGUF_REPO = os.getenv("GGUF_REPO", "smthem/SenseNova-U1-8B-MoT-Merger-gguf")
 GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
+
+# Optional LoRA folded into the GGUF at load time. LORA_REPO/LORA_HF_FILE name the
+# upstream file; LORA_FILE is what it's saved as locally (and what the worker reads).
+LORA_REPO = os.getenv("LORA_REPO", "sensenova/SenseNova-U1-8B-MoT-LoRAs")
+LORA_HF_FILE = os.getenv("LORA_HF_FILE", "SenseNova-U1-8B-MoT-Infographic-LoRA-8step-V1.0.safetensors")
+LORA_FILE = os.getenv("LORA_FILE", "Infographic-LoRA-8step.safetensors")
 
 # Files to pull from the SenseNova "official" repo so AutoConfig / AutoTokenizer
 # and the custom sensenova_u1 module find what they need.
@@ -55,8 +64,15 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def _download(repo: str, filename: str, dest_dir: str, *, optional: bool = False) -> str | None:
-    local_path = os.path.join(dest_dir, os.path.basename(filename))
+def _download(
+    repo: str,
+    filename: str,
+    dest_dir: str,
+    *,
+    optional: bool = False,
+    dest_name: str | None = None,
+) -> str | None:
+    local_path = os.path.join(dest_dir, dest_name or os.path.basename(filename))
     if os.path.exists(local_path):
         size_mb = os.path.getsize(local_path) / (1024 * 1024)
         print(f"  [skip] {os.path.basename(filename)} already present ({size_mb:.1f} MB)")
@@ -85,6 +101,14 @@ def fetch_gguf() -> bool:
     return _download(GGUF_REPO, GGUF_FILE, MODELS_DIR) is not None
 
 
+def fetch_lora() -> bool:
+    if not LORA_FILE:
+        print("\n[lora] LORA_FILE is empty — skipping LoRA download.")
+        return True
+    print(f"\n[lora] {LORA_REPO} :: {LORA_HF_FILE}  ->  {LORA_FILE}")
+    return _download(LORA_REPO, LORA_HF_FILE, MODELS_DIR, dest_name=LORA_FILE) is not None
+
+
 def fetch_helpers() -> None:
     print(f"\n[helpers] from {GGUF_REPO}")
     for filename in HELPER_FILES:
@@ -104,7 +128,7 @@ def fetch_tokenizer_and_config() -> bool:
 
 
 def list_repos() -> None:
-    for repo in (GGUF_REPO, TOKENIZER_REPO):
+    for repo in (GGUF_REPO, LORA_REPO, TOKENIZER_REPO):
         print(f"\n=== {repo} ===")
         try:
             for f in list_repo_files(repo):
@@ -116,8 +140,9 @@ def list_repos() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Download SenseNova-U1 GGUF + config locally.")
     ap.add_argument("--gguf-only", action="store_true", help="Only the GGUF weights.")
+    ap.add_argument("--lora-only", action="store_true", help="Only the LoRA.")
     ap.add_argument("--config-only", action="store_true", help="Only tokenizer + config files.")
-    ap.add_argument("--list", action="store_true", help="List files in both repos and exit.")
+    ap.add_argument("--list", action="store_true", help="List files in all repos and exit.")
     args = ap.parse_args()
 
     if args.list:
@@ -132,8 +157,11 @@ def main() -> int:
         ok = fetch_tokenizer_and_config() and ok
     elif args.gguf_only:
         ok = fetch_gguf() and ok
+    elif args.lora_only:
+        ok = fetch_lora() and ok
     else:
         ok = fetch_gguf() and ok
+        ok = fetch_lora() and ok
         fetch_helpers()
         ok = fetch_tokenizer_and_config() and ok
 

@@ -43,24 +43,40 @@ php -S 127.0.0.1:8081 -t public
 
 ### 3. AI service (Python + image model)
 
+**One-shot installer (recommended).** Builds the Python 3.11 venv, installs CUDA 12.8 PyTorch
+(RTX 50-series / Blackwell) + pinned deps, editable-installs the SenseNova-U1 package, seeds
+`.env`, and downloads the GGUF + 8-step Infographic LoRA + tokenizer/config (~17 GB) into `models/`:
+
 ```powershell
 cd ai-service
-python -m venv .venv
+.\install.ps1                 # full install; -SkipModels for env only, -Recreate to rebuild .venv
+```
+On Linux/macOS use `./install.sh` (same flags as `--skip-models`, `--recreate`, `--skip-torch`).
+
+<details><summary>Manual steps (what the installer automates)</summary>
+
+```powershell
+cd ai-service
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+# CUDA 12.8 PyTorch first (RTX 50-series); then the rest.
+pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 
 # Install the upstream model package so the custom AutoModel registers.
+# --no-deps: its pyproject pins torch==2.8.0, which would clobber the cu128 build.
 git clone https://github.com/OpenSenseNova/SenseNova-U1
-pip install -e .\SenseNova-U1
+pip install -e .\SenseNova-U1 --no-deps
 
-# Pull the GGUF weights, helper script, and tokenizer/config files.
+# Pull the GGUF weights, the 8-step Infographic LoRA, helper script, and tokenizer/config.
 copy .env.example .env
 python download_model.py
 ```
+</details>
 
 Then run it:
 ```powershell
-python run.py
+.\.venv\Scripts\python.exe run.py
 ```
 
 The first generation pays the model load cost (a minute or so on disk + RAM). If `cuda` is not

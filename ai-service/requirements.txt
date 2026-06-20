@@ -9,15 +9,22 @@ pydantic>=2.6
 Pillow>=10
 numpy>=1.26
 
-# Model loading (diffusers handles the GGUF path for SenseNova-U1)
-torch>=2.4
-transformers>=4.45
-diffusers>=0.31
-accelerate>=0.34
+# Model loading (diffusers handles the GGUF path for SenseNova-U1).
+# NOTE: torch / torchvision are installed separately from the CUDA 12.8 wheel
+# index by install.ps1 / install.sh (RTX 50-series / Blackwell need cu128). The
+# floor here just stops `pip install -r` from downgrading an existing CUDA build.
+# The custom NEO-Unify architecture is sensitive to these APIs, so the rest are
+# pinned to the verified-working set.
+torch>=2.7
+transformers==4.57.1
+tokenizers==0.22.1
+diffusers==0.38.0
+accelerate==1.13.0
 safetensors>=0.4
 sentencepiece
 protobuf
-gguf>=0.10.0
+gguf==0.18.0
+httpx>=0.27,<1
 
 # HF hub for downloads
 huggingface-hub>=0.25
