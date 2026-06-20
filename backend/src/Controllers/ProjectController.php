@@ -144,6 +144,16 @@ class ProjectController
             $stmt->execute([json_encode($config), $projectId]);
         }
 
+        // If the user uploaded an image to start from, store it as the chosen
+        // "upload" generation so the studio shows it and it can be edited (it2i)
+        // right away — reusing the whole edit/versions/export flow.
+        if (is_string($config['uploadImage'] ?? null) && $config['uploadImage'] !== '') {
+            $this->createUploadGeneration($db, $projectId, $config['uploadImage']);
+            unset($config['uploadImage']);
+            $config['hasUpload'] = true;
+            $db->prepare('UPDATE projects SET config_json = ? WHERE id = ?')->execute([json_encode($config), $projectId]);
+        }
+
         return $this->returnProject($response, $projectId, 201);
     }
 
@@ -263,6 +273,61 @@ class ProjectController
         $project['config'] = json_decode($project['config_json'] ?? '{}', true) ?: [];
         unset($project['config_json']);
         return $this->json($response, ['project' => $project], $status);
+    }
+
+    /**
+     * Save an uploaded image as the project's chosen "upload" generation. Normalises
+     * to PNG and downscales to the model's 2048 sweet spot (bounds edit memory). The
+     * studio then shows it as the current design and it2i edits work on it directly.
+     */
+    private function createUploadGeneration(\PDO $db, int $projectId, string $base64): void
+    {
+        if (str_contains($base64, ',')) { // tolerate data-URL prefix
+            $base64 = substr($base64, strpos($base64, ',') + 1);
+        }
+        $bytes = base64_decode($base64, true);
+        if ($bytes === false || strlen($bytes) > 12 * 1024 * 1024) {
+            return;
+        }
+        $im = @imagecreatefromstring($bytes);
+        if ($im === false) {
+            return; // not a real/decodable image
+        }
+        $w = imagesx($im);
+        $h = imagesy($im);
+        $maxDim = 2048;
+        if (max($w, $h) > $maxDim) {
+            $scaled = imagescale($im, (int) round($w * $maxDim / max($w, $h))); // height auto (aspect kept)
+            if ($scaled !== false) {
+                imagedestroy($im);
+                $im = $scaled;
+                $w = imagesx($im);
+                $h = imagesy($im);
+            }
+        }
+        $projectDir = $this->uploadsDir() . '/projects/' . $projectId;
+        if (!is_dir($projectDir)) {
+            mkdir($projectDir, 0755, true);
+        }
+        $ins = $db->prepare(
+            'INSERT INTO generations (project_id, parent_generation_id, prompt, model, kind, output_image_url, width, height, is_chosen, created_at)
+             VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, NOW())'
+        );
+        $ins->execute([$projectId, 'Uploaded image', 'upload', 'upload', '', $w, $h]);
+        $genId = (int) $db->lastInsertId();
+        // Random suffix: these files are served unauthenticated (IDOR hardening).
+        $filename = 'generation_' . $genId . '_' . bin2hex(random_bytes(4)) . '.png';
+        $ok = imagepng($im, $projectDir . '/' . $filename);
+        imagedestroy($im);
+        if (!$ok) {
+            $db->prepare('DELETE FROM generations WHERE id = ?')->execute([$genId]);
+            return;
+        }
+        $publicUrl = '/uploads/projects/' . $projectId . '/' . $filename;
+        $db->prepare('UPDATE generations SET output_image_url = ? WHERE id = ?')->execute([$publicUrl, $genId]);
+        $db->prepare('UPDATE generations SET is_chosen = 0 WHERE project_id = ?')->execute([$projectId]);
+        $db->prepare('UPDATE generations SET is_chosen = 1 WHERE id = ?')->execute([$genId]);
+        $db->prepare('UPDATE projects SET chosen_generation_id = ?, status = ? WHERE id = ?')->execute([$genId, 'editing', $projectId]);
     }
 
     private function thumbnailFor(int $projectId, int $chosenGenId, string $uploadsDir): ?string

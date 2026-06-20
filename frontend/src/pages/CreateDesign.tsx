@@ -96,6 +96,34 @@ export function CreateDesign() {
   const [enhance, setEnhance] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [mode, setMode] = useState<'describe' | 'upload'>('describe');
+  const [upload, setUpload] = useState<{ name: string; dataUrl: string } | null>(null);
+
+  const onPickFile = (file: File | undefined | null) => {
+    setError('');
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setError('Please choose an image file (PNG, JPG, etc.).'); return; }
+    if (file.size > 24 * 1024 * 1024) { setError('That image is too large — max 24 MB.'); return; }
+    // Downscale to the model's 2048 sweet spot client-side: keeps the upload
+    // payload small (well under the server's POST limit) and the transfer fast.
+    const img = new Image();
+    const objUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objUrl);
+      const maxDim = 2048;
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (Math.max(w, h) > maxDim) { const s = maxDim / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { setError('Could not process that image.'); return; }
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); // flatten transparency onto white
+      ctx.drawImage(img, 0, 0, w, h);
+      setUpload({ name: file.name, dataUrl: canvas.toDataURL('image/jpeg', 0.92) });
+    };
+    img.onerror = () => { URL.revokeObjectURL(objUrl); setError('Could not read that image.'); };
+    img.src = objUrl;
+  };
 
   const sizePreset = SIZE_OPTIONS.find((s) => s.value === size) || SIZE_OPTIONS[0];
   const typeOption = TYPE_OPTIONS.find((t) => t.value === type) || TYPE_OPTIONS[0];
@@ -105,6 +133,13 @@ export function CreateDesign() {
     setError('');
     setLoading(true);
     try {
+      if (mode === 'upload') {
+        if (!upload) { setError('Please choose an image to upload.'); setLoading(false); return; }
+        const upTitle = upload.name.replace(/\.[^.]+$/, '').slice(0, 60) || 'Uploaded design';
+        const up = await api.createProject({ type, title: upTitle, config: { description: '', uploadImage: upload.dataUrl, steps: STEPS } });
+        navigate(`/studio/${up.project.id}`);
+        return;
+      }
       const titleSeed = description.replace(/\s+/g, ' ').trim().slice(0, 60) || `${type} project`;
       const project = await api.createProject({
         type,
@@ -134,7 +169,9 @@ export function CreateDesign() {
           Describe your design
         </h1>
         <p className="text-on-surface-variant text-base sm:text-lg max-w-xl mx-auto">
-          We'll generate {numConcepts} {numConcepts === 1 ? 'design' : 'concepts'} from your prompt — you can refine after.
+          {mode === 'upload'
+            ? 'Upload an image to refine and edit with prompts.'
+            : `We'll generate ${numConcepts} ${numConcepts === 1 ? 'design' : 'concepts'} from your prompt — you can refine after.`}
         </p>
       </header>
 
@@ -144,6 +181,19 @@ export function CreateDesign() {
             <Icon name="error" className="text-lg flex-shrink-0" /> {error}
           </div>
         )}
+
+        <div className="flex justify-center">
+          <div className="inline-flex bg-surface-container-high rounded-full p-1 gap-1">
+            {([['describe', 'Describe'], ['upload', 'Upload an image']] as const).map(([m, lbl]) => (
+              <button key={m} type="button" onClick={() => { setMode(m); setError(''); }}
+                className={`px-4 sm:px-5 py-2 rounded-full font-headline font-bold text-sm transition-all ${
+                  mode === m ? 'bg-primary-container text-on-primary-container shadow-sm' : 'text-on-surface-variant hover:text-on-surface'
+                }`}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="flex flex-wrap gap-2 justify-center">
           {TYPE_OPTIONS.map((t) => (
@@ -158,6 +208,36 @@ export function CreateDesign() {
           ))}
         </div>
 
+        {mode === 'upload' && (
+          <div className="space-y-2">
+            <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Your image</label>
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); onPickFile(e.dataTransfer.files?.[0]); }}
+              className="relative border-2 border-dashed border-surface-container-high rounded-2xl bg-surface-container-lowest hover:border-primary/50 transition-colors">
+              {upload ? (
+                <div className="flex items-center gap-4 p-4">
+                  <img src={upload.dataUrl} alt="" className="w-24 h-24 object-contain rounded-xl bg-surface-container" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-sm truncate">{upload.name}</p>
+                    <p className="text-xs text-on-surface-variant mt-0.5">We'll open it in the editor so you can refine it with prompts.</p>
+                    <button type="button" onClick={() => setUpload(null)} className="text-xs text-error mt-2 hover:underline">Remove</button>
+                  </div>
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center gap-2 py-12 cursor-pointer text-on-surface-variant">
+                  <Icon name="upload" className="text-3xl text-primary" />
+                  <span className="font-headline font-bold text-sm">Click to choose an image</span>
+                  <span className="text-xs">or drag &amp; drop · PNG, JPG · max 12&nbsp;MB</span>
+                  <input type="file" accept="image/*" className="hidden" onChange={(e) => onPickFile(e.target.files?.[0])} />
+                </label>
+              )}
+            </div>
+          </div>
+        )}
+
+        {mode === 'describe' && (
+        <>
         <div className="space-y-2">
           <div className="flex items-baseline justify-between px-1">
             <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold">Prompt</label>
@@ -225,16 +305,20 @@ export function CreateDesign() {
             </p>
           </div>
         </label>
+        </>
+        )}
 
-        <button type="submit" disabled={loading || !description.trim()}
+        <button type="submit" disabled={loading || (mode === 'describe' ? !description.trim() : !upload)}
           className="w-full bg-primary-container py-4 rounded-2xl font-headline text-lg font-black text-on-primary-container shadow-[0_18px_32px_-12px] shadow-primary-container/40 hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-3 disabled:opacity-50">
-          {loading ? 'Creating…' : `Generate ${numConcepts} ${numConcepts === 1 ? 'Design' : 'Concepts'}`}
-          <Icon name="auto_awesome" className="text-xl" />
+          {loading ? 'Creating…' : mode === 'upload' ? 'Open in editor' : `Generate ${numConcepts} ${numConcepts === 1 ? 'Design' : 'Concepts'}`}
+          <Icon name={mode === 'upload' ? 'edit' : 'auto_awesome'} className="text-xl" />
         </button>
 
-        <p className="text-center text-xs text-on-surface-variant">
-          Output will be {sizePreset.w} × {sizePreset.h}.
-        </p>
+        {mode === 'describe' && (
+          <p className="text-center text-xs text-on-surface-variant">
+            Output will be {sizePreset.w} × {sizePreset.h}.
+          </p>
+        )}
       </form>
     </main>
   );
