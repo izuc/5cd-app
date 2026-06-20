@@ -57,14 +57,17 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(HERE, "models"))
-GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-Q6_K.gguf")
+GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
 DEVICE = os.getenv("DEVICE", "cuda")
 DTYPE_NAME = os.getenv("DTYPE", "bfloat16")
-DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "25"))
+DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "8"))
 DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "4.0"))
 DEFAULT_TIMESTEP_SHIFT = float(os.getenv("DEFAULT_TIMESTEP_SHIFT", "3.0"))
 DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
+# Reasoning ("think") pass before image generation. Off by default — it roughly
+# triples latency. A per-request `think` field overrides this server default.
+DEFAULT_THINK = os.getenv("THINK_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
 PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "2"))
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
 JOB_TTL = int(os.getenv("JOB_TTL", "600"))
@@ -521,8 +524,25 @@ def _pil_to_b64(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+# Bound untrusted ref-image inputs to avoid OOM / decompression-bomb DoS.
+MAX_REF_IMAGES = 4
+MAX_REF_BYTES = 12 * 1024 * 1024  # 12 MB decoded per ref image
+Image.MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP ceiling
+
+
 def _b64_to_pil(b64: str) -> Image.Image:
-    return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    if not isinstance(b64, str):
+        raise ValueError("ref image must be a base64 string")
+    if b64.startswith("data:"):  # tolerate data-URL prefixes
+        b64 = b64.split(",", 1)[-1]
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"invalid base64 ref image: {e}")
+    if len(raw) > MAX_REF_BYTES:
+        raise ValueError("ref image too large")
+    Image.open(io.BytesIO(raw)).verify()  # reject truncated/corrupt data
+    return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +557,7 @@ def _process_generate(job: Job) -> None:
     steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 100))
     cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE))
     enhance = bool(p.get("enhance"))
+    think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
     design_type = p.get("design_type")
     base_seed = p.get("seed")
     if base_seed is None:
@@ -564,7 +585,8 @@ def _process_generate(job: Job) -> None:
         if have_model:
             try:
                 pil, think_text = _run_t2i(prompt, width, height,
-                                           steps=steps, cfg_scale=cfg, seed=seed, batch_size=1)
+                                           steps=steps, cfg_scale=cfg, seed=seed,
+                                           batch_size=1, think_mode=think_flag)
                 img = pil[0]
             except Exception as e:  # noqa: BLE001
                 # Mark the model unhealthy and fall back for the rest of this batch.
@@ -601,6 +623,8 @@ def _process_edit(job: Job) -> None:
     refs_b64 = p.get("ref_images") or []
     if not refs_b64:
         raise ValueError("edit job requires at least one ref image")
+    if len(refs_b64) > MAX_REF_IMAGES:
+        raise ValueError(f"too many ref images (max {MAX_REF_IMAGES})")
     refs = [_b64_to_pil(b) for b in refs_b64]
     # Use `or` rather than dict.get default — pydantic sends Optional[int] fields
     # as explicit None, which dict.get will happily return.
@@ -609,6 +633,7 @@ def _process_edit(job: Job) -> None:
     steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 100))
     cfg = float(p.get("cfg_scale") or DEFAULT_CFG_SCALE)
     img_cfg = float(p.get("img_cfg_scale") or 1.0)
+    think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
     seed = p.get("seed")
     if seed is None:
         seed = random.randint(0, 2**31 - 1)
@@ -618,7 +643,8 @@ def _process_edit(job: Job) -> None:
     if have_model:
         try:
             pil, think_text = _run_edit(prompt, refs, width, height,
-                                        steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg, seed=int(seed))
+                                        steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg,
+                                        seed=int(seed), think_mode=think_flag)
             img = pil[0]
         except Exception as e:  # noqa: BLE001
             global _pipeline, _pipeline_error
@@ -778,6 +804,7 @@ class GenerateRequest(BaseModel):
     cfg_scale: float = DEFAULT_CFG_SCALE
     seed: Optional[int] = None
     enhance: bool = False
+    think: Optional[bool] = None       # override THINK_MODE per request; None = server default
     design_type: Optional[str] = None  # "logo" | "social" | "banner" | "flyer" | "custom"
 
 
@@ -790,6 +817,7 @@ class EditRequest(BaseModel):
     cfg_scale: float = DEFAULT_CFG_SCALE
     img_cfg_scale: float = 1.0
     seed: Optional[int] = None
+    think: Optional[bool] = None       # override THINK_MODE per request; None = server default
 
 
 class ChatRequest(BaseModel):
@@ -940,6 +968,7 @@ async def api_status():
             "width": DEFAULT_WIDTH,
             "height": DEFAULT_HEIGHT,
             "patch_factor": PATCH_FACTOR,
+            "think": DEFAULT_THINK,
         },
         "queue": {
             "queued": sum(1 for j in _jobs.values() if j.status == "queued"),

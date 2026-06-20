@@ -15,7 +15,7 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(HERE, "models")
-GGUF = os.path.join(MODELS_DIR, "SenseNova-U1-8B-MoT-Q6_K.gguf")
+GGUF = os.path.join(MODELS_DIR, os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf"))
 sys.path.insert(0, MODELS_DIR)
 
 import torch

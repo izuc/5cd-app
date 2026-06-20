@@ -10,6 +10,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  if (res.status === 401) {
+    // Token missing/expired/invalid — clear auth so ProtectedRoute redirects to /login.
+    const { useAuthStore } = await import('../store/authStore');
+    useAuthStore.getState().logout();
+    throw new Error('Your session has expired. Please log in again.');
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ message: res.statusText }));
     throw new Error(body.message || (typeof body.error === 'string' ? body.error : null) || `Request failed: ${res.status}`);

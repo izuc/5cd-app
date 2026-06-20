@@ -38,9 +38,9 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'num_concepts' => max(1, min(4, (int) ($config['numConcepts'] ?? ($data['num_concepts'] ?? 1)))),
-            'width' => (int) ($data['width'] ?? 2048),
-            'height' => (int) ($data['height'] ?? 2048),
-            'steps' => (int) ($data['steps'] ?? 50),
+            'width' => (int) ($data['width'] ?? 1024),
+            'height' => (int) ($data['height'] ?? 1024),
+            'steps' => (int) ($data['steps'] ?? 8),
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
             'enhance' => (bool) ($data['enhance'] ?? $config['enhance'] ?? false),
@@ -102,7 +102,7 @@ class GenerationController
             return $this->json($response, ['error' => true, 'message' => 'No image to edit'], 400);
         }
 
-        $bytes = $this->loadImageBytes($imageUrl);
+        $bytes = $this->loadImageBytes($imageUrl, $projectId);
         if ($bytes === null) {
             return $this->json($response, ['error' => true, 'message' => 'Source image not found: ' . $imageUrl], 404);
         }
@@ -110,7 +110,7 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'ref_images' => [base64_encode($bytes)],
-            'steps' => (int) ($data['steps'] ?? 50),
+            'steps' => (int) ($data['steps'] ?? 8),
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'img_cfg_scale' => (float) ($data['img_cfg_scale'] ?? 1.0),
         ];
@@ -195,7 +195,18 @@ class GenerationController
 
     public function getJobStatus(Request $request, Response $response, array $args): Response
     {
+        $userId = $request->getAttribute('userId');
         $jobId = (string) $args['jobId'];
+
+        // Only allow polling a job that belongs to one of the caller's projects
+        // (prevents cross-user disclosure of generated images/prompts via job id).
+        $db = Database::getConnection();
+        $stmt = $db->prepare('SELECT id FROM projects WHERE ai_job_id = ? AND user_id = ?');
+        $stmt->execute([$jobId, $userId]);
+        if (!$stmt->fetch()) {
+            return $this->json($response, ['job_id' => $jobId, 'status' => 'unknown', 'progress' => 0], 404);
+        }
+
         $url = $this->aiUrl() . '/api/jobs/' . rawurlencode($jobId);
 
         $ch = curl_init($url);
@@ -247,8 +258,25 @@ class GenerationController
             return;
         }
 
-        $images = $data['result']['images'] ?? [];
+        $result = $data['result'] ?? [];
+        // A placeholder/failed result is not a real design — reset to draft rather
+        // than persisting the fallback swatch as a finished generation.
+        if (!empty($result['placeholder'])) {
+            $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = NULL, updated_at = NOW() WHERE id = ? AND ai_job_id = ?');
+            $stmt->execute(['draft', $projectId, $project['ai_job_id']]);
+            return;
+        }
+
+        $images = $result['images'] ?? [];
         if (empty($images)) {
+            return;
+        }
+
+        // Atomically claim this job so concurrent polls can't double-insert the
+        // same generations/files — only the winner (rowCount === 1) proceeds.
+        $claim = $db->prepare('UPDATE projects SET ai_job_id = NULL WHERE id = ? AND ai_job_id = ?');
+        $claim->execute([$projectId, $project['ai_job_id']]);
+        if ($claim->rowCount() !== 1) {
             return;
         }
 
@@ -330,20 +358,29 @@ class GenerationController
         return $data['job_id'] ?? null;
     }
 
-    private function loadImageBytes(string $url): ?string
+    /**
+     * Load the bytes of a source image for editing. Only files inside THIS
+     * project's own uploads directory are allowed: no remote URLs (SSRF), no
+     * path traversal, and no cross-project/tenant reads (IDOR).
+     */
+    private function loadImageBytes(string $url, int $projectId): ?string
     {
         $clean = preg_replace('/\?.*$/', '', $url);
+        if (!str_starts_with($clean, '/uploads/')) {
+            return null;
+        }
         $uploadsDir = $this->uploadsDir();
-        if (str_starts_with($clean, '/uploads/')) {
-            $path = $uploadsDir . substr($clean, strlen('/uploads'));
-            return is_file($path) ? file_get_contents($path) : null;
+        $candidate = realpath($uploadsDir . substr($clean, strlen('/uploads')));
+        if ($candidate === false || !is_file($candidate)) {
+            return null;
         }
-        if (filter_var($clean, FILTER_VALIDATE_URL)) {
-            $bytes = @file_get_contents($clean);
-            return $bytes ?: null;
+        // Confine the resolved path to this project's own upload directory.
+        $projectRoot = realpath($uploadsDir . '/projects/' . $projectId);
+        if ($projectRoot === false
+            || strncmp($candidate, $projectRoot . DIRECTORY_SEPARATOR, strlen($projectRoot) + 1) !== 0) {
+            return null;
         }
-        $fallback = $uploadsDir . '/' . ltrim($clean, '/');
-        return is_file($fallback) ? file_get_contents($fallback) : null;
+        return file_get_contents($candidate);
     }
 
     private function aiUrl(): string

@@ -103,7 +103,7 @@ class AuthController
 
     private function makeToken(int $userId, string $email): string
     {
-        $secret = $_ENV['JWT_SECRET'] ?? 'default_secret';
+        $secret = $_ENV['JWT_SECRET'] ?? '';
         $expiry = (int) ($_ENV['JWT_EXPIRY'] ?? 604800);
         $payload = [
             'iss' => '5cd.com',

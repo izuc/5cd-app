@@ -77,7 +77,7 @@ const SIZE_OPTIONS = [
   { value: '1024x1024', label: 'Square 1:1 · 1024 (preview, slower text)', w: 1024, h: 1024 },
 ];
 
-const STEPS = 50; // Model was trained on 50 steps; keep it fixed for predictable quality.
+const STEPS = 8; // 8-step distilled model (8step-Q4_K_S) — fast mode. More steps don't help this model and add latency.
 
 export function CreateDesign() {
   const [searchParams] = useSearchParams();

@@ -20,7 +20,7 @@ def main() -> None:
 
     print(f"\n{'=' * 56}\n  5cd-single AI Worker\n{'=' * 56}")
     print(f"  Models dir: {os.getenv('MODELS_DIR', './models')}")
-    print(f"  GGUF file : {os.getenv('GGUF_FILE', 'SenseNova-U1-8B-MoT-Q6_K.gguf')}")
+    print(f"  GGUF file : {os.getenv('GGUF_FILE', 'SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf')}")
     print(f"  Device    : {os.getenv('DEVICE', 'cuda')} ({os.getenv('DTYPE', 'bfloat16')})")
     print(f"  Listening : http://{args.host}:{args.port}")
     print(f"  Docs      : http://{args.host}:{args.port}/docs")

@@ -26,7 +26,7 @@ load_dotenv()
 MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(__file__), "models"))
 TOKENIZER_REPO = os.getenv("TOKENIZER_REPO", "sensenova/SenseNova-U1-8B-MoT")
 GGUF_REPO = os.getenv("GGUF_REPO", "smthem/SenseNova-U1-8B-MoT-Merger-gguf")
-GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-Q6_K.gguf")
+GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
 
 # Files to pull from the SenseNova "official" repo so AutoConfig / AutoTokenizer
 # and the custom sensenova_u1 module find what they need.

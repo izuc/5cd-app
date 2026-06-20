@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 import { applyTheme, getStoredTheme, storeTheme } from '../lib/theme';
+import { useAuthStore } from '../store/authStore';
 
 interface ThemeContextValue {
   themeColor: string;
@@ -13,10 +14,20 @@ const ThemeContext = createContext<ThemeContextValue>({
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [themeColor, setThemeColorState] = useState(getStoredTheme);
+  const userThemeColor = useAuthStore((s) => s.user?.theme_color);
 
   useEffect(() => {
     applyTheme(themeColor);
   }, [themeColor]);
+
+  // When the signed-in user's saved theme loads, make it the source of truth
+  // (without re-PATCHing the server).
+  useEffect(() => {
+    if (userThemeColor) {
+      setThemeColorState(userThemeColor);
+      storeTheme(userThemeColor);
+    }
+  }, [userThemeColor]);
 
   const setThemeColor = (hex: string) => {
     setThemeColorState(hex);
