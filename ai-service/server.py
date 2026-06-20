@@ -598,11 +598,13 @@ def _process_generate(job: Job) -> None:
 
     images_b64: list[str] = []
     think_texts: list[str] = []
+    placeholder_flags: list[bool] = []
     real_count = 0
     last_error = ""
 
     for i in range(num):
         seed = int(base_seed) + i
+        is_ph = True
         if have_model:
             try:
                 pil, think_text = _run_t2i(prompt, width, height,
@@ -611,6 +613,7 @@ def _process_generate(job: Job) -> None:
                                            timestep_shift=ts_shift)
                 img = pil[0]
                 real_count += 1
+                is_ph = False
             except Exception as e:  # noqa: BLE001
                 # Fall back to a placeholder for THIS concept only; keep the model
                 # loaded so the rest of the batch (and future jobs) still use it.
@@ -623,6 +626,7 @@ def _process_generate(job: Job) -> None:
             think_text = ""
         images_b64.append(_pil_to_b64(img))
         think_texts.append(think_text)
+        placeholder_flags.append(is_ph)
         job.progress = int(((i + 1) / num) * 100)
 
     # The whole job is "placeholder" only if NO real concept was produced.
@@ -631,6 +635,7 @@ def _process_generate(job: Job) -> None:
         "images": images_b64,
         "think": think_texts,
         "enhanced_prompt": enhanced_prompt,
+        "placeholder_flags": placeholder_flags,  # per-concept: True where a placeholder was used
         "model": "placeholder" if placeholder else "sensenova-u1",
         "width": width,
         "height": height,
@@ -674,9 +679,11 @@ def _process_edit(job: Job) -> None:
                                         timestep_shift=ts_shift)
             img = pil[0]
         except Exception as e:  # noqa: BLE001
-            global _pipeline, _pipeline_error
+            # Fall back to a placeholder for THIS job only; keep the model loaded so a
+            # single bad edit doesn't brick all future jobs (mirrors the generate path).
+            global _pipeline_error
             _pipeline_error = f"Edit inference failed: {e}"
-            _pipeline = None
+            print(f"[ai] {job.id} edit failed: {e}")
             have_model = False
             img = _placeholder_image(prompt, width, height, int(seed))
     else:

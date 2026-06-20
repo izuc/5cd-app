@@ -27,6 +27,7 @@ export function DesignStudio() {
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const initialKickRef = useRef(false);
   const autoChosenRef = useRef(false);
+  const jobSeenRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -108,6 +109,7 @@ export function DesignStudio() {
         }
         // While the job is running, also fetch its progress for the progress bar.
         if (res.ai_job_id) {
+          jobSeenRef.current = true;
           try {
             const status = await api.getJobStatus(res.ai_job_id);
             if (!cancelled && typeof status.progress === 'number') setProgress(status.progress);
@@ -115,6 +117,12 @@ export function DesignStudio() {
         }
         // Stop polling once we have generations AND no active job.
         if (gens.length > 0 && !res.ai_job_id) {
+          return false;
+        }
+        // Terminal failure: a job ran but finished with no result (e.g. the model was
+        // unavailable and produced a placeholder). Stop polling and surface an error.
+        if (jobSeenRef.current && !res.ai_job_id && gens.length === 0) {
+          setError('Generation failed — the model was unavailable. Please try again.');
           return false;
         }
       } catch {}
@@ -154,7 +162,9 @@ export function DesignStudio() {
     try {
       const res = await api.edit(parseInt(projectId), msg, chosen.output_image_url);
       const jobId = res.job_id;
-      // Poll for completion
+      // Edits already present before this run — lets us detect the new one if the
+      // background poll claims + saves the job before this loop sees it complete.
+      const priorEditIds = new Set((generations || []).filter((g) => g.kind === 'edit').map((g) => g.id));
       let done = false;
       for (let i = 0; i < 240; i++) {
         await new Promise((r) => setTimeout(r, 2500));
@@ -162,7 +172,21 @@ export function DesignStudio() {
         try {
           status = await api.getJobStatus(jobId);
         } catch {
-          continue; // transient poll error — keep waiting, the job is still running
+          // getJobStatus 404s once the background poll clears ai_job_id — check whether
+          // a new edit generation has landed and treat that as success.
+          try {
+            const list = await api.listGenerations(parseInt(projectId));
+            const fresh = (list.generations || []).filter((g) => g.kind === 'edit' && !priorEditIds.has(g.id));
+            if (fresh.length) {
+              const ng = fresh[fresh.length - 1];
+              setGenerations(list.generations);
+              setChosen(ng);
+              setChatMessages((prev) => [...prev.slice(0, -1), { role: 'assistant', text: 'Done — here is the updated design.', imageUrl: ng.output_image_url + '?t=' + Date.now() }]);
+              done = true;
+              break;
+            }
+          } catch {}
+          continue; // otherwise keep waiting — the job is still running
         }
         if (status.status === 'completed' && status.result?.placeholder) {
           setChatMessages((prev) => [...prev.slice(0, -1), { role: 'assistant', text: `The model is currently unavailable${status.result?.error ? ` (${status.result.error})` : ''} — please try again.` }]);

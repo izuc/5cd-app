@@ -26,10 +26,11 @@ export function Settings() {
     setPwMsg('');
     setPwBusy(true);
     try {
-      const res = await api.changePassword(currentPassword, newPassword);
-      setPwMsg(res.message);
-      setCurrentPassword('');
-      setNewPassword('');
+      await api.changePassword(currentPassword, newPassword);
+      // Changing the password invalidates this session's token server-side, so sign
+      // out cleanly and send the user to log in again (rather than hitting a 401).
+      logout();
+      navigate('/login');
     } catch (err: any) {
       setPwErr(err.message || 'Failed to change password');
     } finally {

@@ -38,8 +38,8 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'num_concepts' => max(1, min(6, (int) ($config['numConcepts'] ?? ($data['num_concepts'] ?? 1)))),
-            'width' => (int) ($data['width'] ?? 1024),
-            'height' => (int) ($data['height'] ?? 1024),
+            'width' => max(256, min(4096, (int) ($data['width'] ?? 1024))),
+            'height' => max(256, min(4096, (int) ($data['height'] ?? 1024))),
             'steps' => (int) ($data['steps'] ?? 8),
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
@@ -292,8 +292,13 @@ class GenerationController
         // A placeholder/failed result is not a real design — reset to draft rather
         // than persisting the fallback swatch as a finished generation.
         if (!empty($result['placeholder'])) {
+            // An edit can fail to a placeholder on a project that already has designs —
+            // keep it 'editing'; only a fresh project with nothing falls back to 'draft'.
+            $cnt = $db->prepare('SELECT COUNT(*) FROM generations WHERE project_id = ?');
+            $cnt->execute([$projectId]);
+            $newStatus = ((int) $cnt->fetchColumn() > 0) ? 'editing' : 'draft';
             $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = NULL, updated_at = NOW() WHERE id = ? AND ai_job_id = ?');
-            $stmt->execute(['draft', $projectId, $project['ai_job_id']]);
+            $stmt->execute([$newStatus, $projectId, $project['ai_job_id']]);
             return;
         }
 
@@ -338,15 +343,20 @@ class GenerationController
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NOW())'
         );
 
+        $flags = $result['placeholder_flags'] ?? [];
         $newIds = [];
         foreach ($images as $i => $b64) {
+            if (!empty($flags[$i])) {
+                continue; // skip per-concept placeholder swatches from a partial failure
+            }
             $bytes = base64_decode($b64);
             if ($bytes === false) {
                 continue;
             }
             $insert->execute([$projectId, $parentId, $prompt, $model, $kind, '', $width, $height]);
             $genId = (int) $db->lastInsertId();
-            $filename = 'generation_' . $genId . '.png';
+            // Random suffix makes the path unguessable — these files are served unauthenticated.
+            $filename = 'generation_' . $genId . '_' . bin2hex(random_bytes(4)) . '.png';
             if (file_put_contents($projectDir . '/' . $filename, $bytes) === false) {
                 // Don't leave a generation row pointing at a file we couldn't write.
                 $db->prepare('DELETE FROM generations WHERE id = ?')->execute([$genId]);

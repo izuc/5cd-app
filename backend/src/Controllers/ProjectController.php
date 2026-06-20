@@ -38,7 +38,8 @@ class ProjectController
         if ($query !== '') {
             // Match against title or project type so users can search "logo" or by name.
             $where .= ' AND (title LIKE ? OR type LIKE ?)';
-            $like = '%' . str_replace(['%', '_'], ['\%', '\_'], $query) . '%';
+            // Escape the backslash first, then the LIKE wildcards (MySQL's default escape is '\').
+            $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $query) . '%';
             $bindings[] = $like;
             $bindings[] = $like;
         }
@@ -257,23 +258,22 @@ class ProjectController
 
     private function thumbnailFor(int $projectId, int $chosenGenId, string $uploadsDir): ?string
     {
+        // Generation filenames carry a random suffix, so resolve via the stored URL
+        // (not by reconstructing from the id). Prefer the chosen generation, else newest.
+        $db = Database::getConnection();
         if ($chosenGenId > 0) {
-            $candidate = $uploadsDir . '/projects/' . $projectId . '/generation_' . $chosenGenId . '.png';
-            if (is_file($candidate)) {
-                return '/uploads/projects/' . $projectId . '/generation_' . $chosenGenId . '.png?t=' . filemtime($candidate);
-            }
+            $stmt = $db->prepare('SELECT output_image_url FROM generations WHERE id = ? AND project_id = ?');
+            $stmt->execute([$chosenGenId, $projectId]);
+        } else {
+            $stmt = $db->prepare('SELECT output_image_url FROM generations WHERE project_id = ? ORDER BY id DESC LIMIT 1');
+            $stmt->execute([$projectId]);
         }
-        $dir = $uploadsDir . '/projects/' . $projectId;
-        if (is_dir($dir)) {
-            $files = glob($dir . '/generation_*.png') ?: [];
-            sort($files);
-            if (!empty($files)) {
-                $f = $files[0];
-                $name = basename($f);
-                return '/uploads/projects/' . $projectId . '/' . $name . '?t=' . filemtime($f);
-            }
+        $url = (string) (($stmt->fetch()['output_image_url'] ?? '') ?: '');
+        if ($url === '') {
+            return null;
         }
-        return null;
+        $path = $uploadsDir . preg_replace('#^/uploads#', '', $url);
+        return is_file($path) ? $url . '?t=' . filemtime($path) : $url;
     }
 
     private function uploadsDir(): string

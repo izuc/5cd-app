@@ -64,7 +64,8 @@ class CreditController
             return $this->json($response, ['success' => true, 'credits' => $balance]);
         } catch (\Throwable $e) {
             $db->rollBack();
-            return $this->json($response, ['error' => true, 'message' => $e->getMessage()], 500);
+            $msg = ($_ENV['APP_ENV'] ?? 'production') === 'development' ? $e->getMessage() : 'Purchase failed';
+            return $this->json($response, ['error' => true, 'message' => $msg], 500);
         }
     }
 
