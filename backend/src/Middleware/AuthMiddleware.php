@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Middleware;
 
+use App\Config\Database;
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 use Psr\Http\Message\ResponseInterface as Response;
@@ -27,6 +28,17 @@ class AuthMiddleware implements MiddlewareInterface
         try {
             $secret = $_ENV['JWT_SECRET'] ?? '';
             $decoded = JWT::decode($token, new Key($secret, 'HS256'));
+
+            // Reject tokens invalidated by a later password change (token_version bump)
+            // or whose user no longer exists.
+            $db = Database::getConnection();
+            $stmt = $db->prepare('SELECT token_version FROM users WHERE id = ?');
+            $stmt->execute([$decoded->sub]);
+            $row = $stmt->fetch();
+            if (!$row || (int) ($decoded->tv ?? 0) !== (int) $row['token_version']) {
+                return $this->unauthorized('Invalid or expired token');
+            }
+
             $request = $request->withAttribute('userId', $decoded->sub);
             $request = $request->withAttribute('userEmail', $decoded->email);
             return $handler->handle($request);

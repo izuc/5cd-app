@@ -114,13 +114,23 @@ class ProjectController
         $refImages = $config['referenceImages'] ?? [];
         $count = 0;
         if (!empty($refImages) && is_array($refImages)) {
+            $refImages = array_slice(array_values($refImages), 0, 8); // cap number of refs
             $refDir = $this->uploadsDir() . '/projects/' . $projectId . '/references';
             if (!is_dir($refDir)) {
                 mkdir($refDir, 0755, true);
             }
             foreach ($refImages as $i => $base64) {
-                $imageData = base64_decode((string) $base64);
-                if ($imageData === false) {
+                if (!is_string($base64)) {
+                    continue;
+                }
+                if (str_contains($base64, ',')) { // tolerate data-URL prefix
+                    $base64 = substr($base64, strpos($base64, ',') + 1);
+                }
+                $imageData = base64_decode($base64, true);
+                if ($imageData === false || strlen($imageData) > 12 * 1024 * 1024) {
+                    continue;
+                }
+                if (@getimagesizefromstring($imageData) === false) { // must be a real image
                     continue;
                 }
                 file_put_contents($refDir . '/ref_' . $i . '.png', $imageData);

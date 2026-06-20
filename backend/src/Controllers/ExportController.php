@@ -45,8 +45,8 @@ class ExportController
                 return $this->json($response, ['error' => true, 'message' => 'No chosen design to export'], 400);
             }
 
-            $stmt = $db->prepare('SELECT output_image_url FROM generations WHERE id = ?');
-            $stmt->execute([$row['chosen_generation_id']]);
+            $stmt = $db->prepare('SELECT output_image_url FROM generations WHERE id = ? AND project_id = ?');
+            $stmt->execute([$row['chosen_generation_id'], $projectId]);
             $gen = $stmt->fetch();
             if (!$gen || empty($gen['output_image_url'])) {
                 $db->rollBack();
@@ -61,18 +61,21 @@ class ExportController
             }
 
             $exportDir = $uploadsDir . '/projects/' . $projectId . '/exports';
-            if (!is_dir($exportDir)) {
-                mkdir($exportDir, 0755, true);
+            if (!is_dir($exportDir) && !mkdir($exportDir, 0755, true) && !is_dir($exportDir)) {
+                throw new \RuntimeException('Could not create export directory');
             }
 
-            $filename = 'export_' . time() . '_' . $format;
+            // Random suffix avoids same-second filename collisions overwriting prior exports.
+            $filename = 'export_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $format;
             $publicPath = '/uploads/projects/' . $projectId . '/exports/';
             $diskPath = $exportDir . '/';
 
             switch ($format) {
                 case 'png':
                     $outName = $filename . '.png';
-                    copy($sourcePath, $diskPath . $outName);
+                    if (!copy($sourcePath, $diskPath . $outName)) {
+                        throw new \RuntimeException('Failed to write export file');
+                    }
                     break;
                 case 'transparent_png':
                     $outName = $filename . '.png';
@@ -168,9 +171,12 @@ class ExportController
                 imagesetpixel($out, $x, $y, $color);
             }
         }
-        imagepng($out, $destPath);
+        $ok = imagepng($out, $destPath);
         imagedestroy($img);
         imagedestroy($out);
+        if (!$ok) {
+            throw new \RuntimeException('Failed to write transparent PNG export');
+        }
     }
 
     private function makeJpg(string $sourcePath, string $destPath): void
@@ -185,9 +191,12 @@ class ExportController
         $white = imagecolorallocate($bg, 255, 255, 255);
         imagefilledrectangle($bg, 0, 0, $w, $h, $white);
         imagecopy($bg, $img, 0, 0, 0, 0, $w, $h);
-        imagejpeg($bg, $destPath, 92);
+        $ok = imagejpeg($bg, $destPath, 92);
         imagedestroy($img);
         imagedestroy($bg);
+        if (!$ok) {
+            throw new \RuntimeException('Failed to write JPG export');
+        }
     }
 
     private function makePdf(string $sourcePath, string $destPath): void
@@ -196,13 +205,14 @@ class ExportController
         // Falls back to copying the PNG if GD is unavailable.
         $size = @getimagesize($sourcePath);
         if ($size === false) {
-            copy($sourcePath, $destPath);
+            if (!copy($sourcePath, $destPath)) {
+                throw new \RuntimeException('Failed to write PDF export');
+            }
             return;
         }
         $w = $size[0];
         $h = $size[1];
 
-        $imgData = file_get_contents($sourcePath);
         // Use a JPEG inside the PDF for portability (PDF supports DCTDecode natively).
         $jpegPath = $destPath . '.tmp.jpg';
         $this->makeJpg($sourcePath, $jpegPath);
@@ -233,7 +243,9 @@ class ExportController
         }
         $output .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\nstartxref\n{$xrefStart}\n%%EOF\n";
 
-        file_put_contents($destPath, $output);
+        if (file_put_contents($destPath, $output) === false) {
+            throw new \RuntimeException('Failed to write PDF export');
+        }
     }
 
     private function uploadsDir(): string

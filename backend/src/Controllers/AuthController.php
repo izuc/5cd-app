@@ -66,7 +66,7 @@ class AuthController
         }
 
         $db = Database::getConnection();
-        $stmt = $db->prepare('SELECT id, email, password_hash, display_name, credits, plan, theme_color, created_at FROM users WHERE email = ?');
+        $stmt = $db->prepare('SELECT id, email, password_hash, display_name, credits, plan, theme_color, token_version, created_at FROM users WHERE email = ?');
         $stmt->execute([$email]);
         $user = $stmt->fetch();
 
@@ -74,8 +74,8 @@ class AuthController
             return $this->json($response, ['error' => true, 'message' => 'Invalid email or password'], 401);
         }
 
-        $token = $this->makeToken((int) $user['id'], $user['email']);
-        unset($user['password_hash']);
+        $token = $this->makeToken((int) $user['id'], $user['email'], (int) $user['token_version']);
+        unset($user['password_hash'], $user['token_version']);
 
         return $this->json($response, ['token' => $token, 'user' => $user]);
     }
@@ -101,7 +101,7 @@ class AuthController
         return $this->json($response, ['user' => $user]);
     }
 
-    private function makeToken(int $userId, string $email): string
+    private function makeToken(int $userId, string $email, int $tokenVersion = 0): string
     {
         $secret = $_ENV['JWT_SECRET'] ?? '';
         $expiry = (int) ($_ENV['JWT_EXPIRY'] ?? 604800);
@@ -109,6 +109,7 @@ class AuthController
             'iss' => '5cd.com',
             'sub' => $userId,
             'email' => $email,
+            'tv' => $tokenVersion,
             'iat' => time(),
             'exp' => time() + $expiry,
         ];

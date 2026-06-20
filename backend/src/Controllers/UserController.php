@@ -47,10 +47,11 @@ class UserController
         }
 
         $hash = password_hash($new, PASSWORD_BCRYPT);
-        $stmt = $db->prepare('UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?');
+        // Bump token_version so all previously-issued JWTs for this user stop validating.
+        $stmt = $db->prepare('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = NOW() WHERE id = ?');
         $stmt->execute([$hash, $userId]);
 
-        return $this->json($response, ['message' => 'Password updated']);
+        return $this->json($response, ['message' => 'Password updated. Please sign in again.']);
     }
 
     public function deleteAccount(Request $request, Response $response): Response
