@@ -45,6 +45,11 @@ try:
 except Exception:
     pass
 
+# Reduce CUDA fragmentation so freed activations can be reused. The LoRA-merged
+# Infographic model is large (~28GB resident); without this, edits OOM'd on a
+# 32GB card. Must be set before torch initialises CUDA.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from fastapi import FastAPI
@@ -275,21 +280,29 @@ def _set_gguf_into_meta_model(meta_model, state_dict, dtype, device) -> None:
 def _apply_lora_to_gguf_sd(state_dict: dict, lora_path: str, dtype) -> dict:
     """Fold a kohya-style safetensors LoRA into a GGUF state dict at load time.
 
-    Mirrors ComfyUI_SenseNova_U1's apply_loras_gguf: for each base weight with a
-    matching {prefix}.lora_down/.lora_up/.alpha, dequantize the GGUF tensor and add
-    delta_W = (alpha/rank) * (up @ down). Touched tensors come out dequantized at
-    compute dtype; everything else stays GGUF-quantized.
+    For each base weight with a matching {prefix}.lora_down/.lora_up/.alpha,
+    dequantize the GGUF tensor, add delta_W = (alpha/rank)*(up@down), then
+    RE-QUANTIZE the merged result to Q8_0. ComfyUI leaves the touched tensors as
+    bf16, which ~doubles resident VRAM (~16GB -> ~28GB) and OOMs edits on a 32GB
+    card; re-quantizing keeps memory near the original GGUF size. Q8_0 round-trips
+    at ~1e-4 error (the gguf lib can't write K-quants, but Q8_0 is high precision).
     """
     import torch
     from safetensors.torch import safe_open
-    from diffusers.quantizers.gguf.utils import dequantize_gguf_tensor
+    from diffusers.quantizers.gguf.utils import dequantize_gguf_tensor, GGUFParameter
+    try:
+        from gguf.quants import quantize as _gguf_quantize
+        from gguf import GGMLQuantizationType
+        _q8 = GGMLQuantizationType.Q8_0
+    except Exception:
+        _gguf_quantize, _q8 = None, None
 
     lora_sd: dict = {}
     with safe_open(lora_path, framework="pt", device="cpu") as f:
         for k in f.keys():
             lora_sd[k] = f.get_tensor(k)
 
-    applied = 0
+    applied = requant = 0
     out: dict = {}
     for key, weight in state_dict.items():
         prefix = key[: -len(".weight")] if key.endswith(".weight") else None
@@ -305,10 +318,22 @@ def _apply_lora_to_gguf_sd(state_dict: dict, lora_path: str, dtype) -> dict:
             base = dequantize_gguf_tensor(weight).to(torch.float32)
         else:
             base = weight.to(torch.float32)
-        out[key] = (base + delta).to(dtype)
-        del base, delta
+        merged = (base + delta).contiguous()
+        placed = False
+        if _gguf_quantize is not None:
+            try:
+                q = _gguf_quantize(merged.numpy(), _q8)
+                out[key] = GGUFParameter(torch.from_numpy(q), quant_type=_q8)
+                requant += 1
+                placed = True
+            except Exception:
+                placed = False
+        if not placed:
+            out[key] = merged.to(dtype)  # fallback: full precision (more VRAM)
+        del base, delta, merged
         applied += 1
-    print(f"[ai] LoRA merged into {applied} tensors from {os.path.basename(lora_path)}")
+    print(f"[ai] LoRA merged into {applied} tensors ({requant} re-quantized Q8_0) "
+          f"from {os.path.basename(lora_path)}")
     del lora_sd
     gc.collect()
     return out
@@ -350,27 +375,42 @@ def _run_enhance(prompt: str, design_type: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 # Diffusion calls (real model path)
 # ---------------------------------------------------------------------------
+def _free_vram() -> None:
+    """Release cached CUDA activations between jobs so VRAM doesn't creep into OOM
+    (the LoRA-merged model is large; edits need the reclaimed headroom). Also runs
+    after a failed forward so a partial allocation doesn't poison the next request."""
+    try:
+        gc.collect()
+        if _torch is not None and _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: float,
              seed: int, batch_size: int, think_mode: bool = True,
              cfg_norm: str = "none", timestep_shift: float = DEFAULT_TIMESTEP_SHIFT) -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
-    with _torch.inference_mode():
-        out = model.t2i_generate(
-            _tokenizer,
-            prompt,
-            image_size=(width, height),
-            cfg_scale=cfg_scale,
-            cfg_norm=cfg_norm,
-            timestep_shift=timestep_shift,
-            cfg_interval=(0.0, 1.0),
-            num_steps=steps,
-            batch_size=batch_size,
-            seed=seed,
-            think_mode=think_mode,
-        )
-    # think_mode=True returns (tensor, think_text); otherwise just tensor.
-    tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
-    return _denorm_to_pil(tensor), think_text
+    try:
+        with _torch.inference_mode():
+            out = model.t2i_generate(
+                _tokenizer,
+                prompt,
+                image_size=(width, height),
+                cfg_scale=cfg_scale,
+                cfg_norm=cfg_norm,
+                timestep_shift=timestep_shift,
+                cfg_interval=(0.0, 1.0),
+                num_steps=steps,
+                batch_size=batch_size,
+                seed=seed,
+                think_mode=think_mode,
+            )
+        # think_mode=True returns (tensor, think_text); otherwise just tensor.
+        tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
+        return _denorm_to_pil(tensor), think_text
+    finally:
+        _free_vram()
 
 
 def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: int, *,
@@ -378,24 +418,27 @@ def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: in
               think_mode: bool = True, cfg_norm: str = "none",
               timestep_shift: float = DEFAULT_TIMESTEP_SHIFT) -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
-    with _torch.inference_mode():
-        out = model.it2i_generate(
-            _tokenizer,
-            prompt,
-            ref_images,
-            image_size=(width, height),
-            cfg_scale=cfg_scale,
-            img_cfg_scale=img_cfg_scale,
-            cfg_norm=cfg_norm,
-            timestep_shift=timestep_shift,
-            cfg_interval=(0.0, 1.0),
-            num_steps=steps,
-            batch_size=1,
-            seed=seed,
-            think_mode=think_mode,
-        )
-    tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
-    return _denorm_to_pil(tensor), think_text
+    try:
+        with _torch.inference_mode():
+            out = model.it2i_generate(
+                _tokenizer,
+                prompt,
+                ref_images,
+                image_size=(width, height),
+                cfg_scale=cfg_scale,
+                img_cfg_scale=img_cfg_scale,
+                cfg_norm=cfg_norm,
+                timestep_shift=timestep_shift,
+                cfg_interval=(0.0, 1.0),
+                num_steps=steps,
+                batch_size=1,
+                seed=seed,
+                think_mode=think_mode,
+            )
+        tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
+        return _denorm_to_pil(tensor), think_text
+    finally:
+        _free_vram()
 
 
 # ---------------------------------------------------------------------------
