@@ -44,6 +44,23 @@ export function DesignStudio() {
     return cgs[0];
   };
 
+  // Rebuild the edit conversation from stored generations so reopening a project
+  // shows the full history (the original, then each edit's instruction + result).
+  const reconstructChat = (gens: Generation[]): ChatMsg[] => {
+    const edits = gens.filter((g) => g.kind === 'edit').slice().sort((a, b) => a.id - b.id);
+    if (edits.length === 0) return [];
+    const msgs: ChatMsg[] = [];
+    const orig = gens.filter((g) => g.kind === 'concept').sort((a, b) => a.id - b.id)[0];
+    if (orig) {
+      msgs.push({ role: 'assistant', text: 'Your original design.', imageUrl: orig.output_image_url + '?t=' + new Date(orig.created_at).getTime() });
+    }
+    for (const g of edits) {
+      msgs.push({ role: 'user', text: g.prompt || 'Edit' });
+      msgs.push({ role: 'assistant', text: 'Updated design.', imageUrl: g.output_image_url + '?t=' + new Date(g.created_at).getTime() });
+    }
+    return msgs;
+  };
+
   // Load the project once
   useEffect(() => {
     if (!projectId) return;
@@ -55,6 +72,8 @@ export function DesignStudio() {
       setProject(res.project);
       const gens = res.project.generations || [];
       setGenerations(gens);
+      // Restore the edit conversation so a returning user can browse their changes.
+      setChatMessages(reconstructChat(gens));
       const ch = gens.find((g) => g.is_chosen) || pickIfSingle(pid, gens) || null;
       setChosen(ch);
 
@@ -358,14 +377,16 @@ export function DesignStudio() {
 
           {editHistory.length > 0 && (
             <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest">
-              <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Edit history</p>
+              <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Versions · click to revert</p>
               <div className="flex gap-3 overflow-x-auto">
-                {editHistory.map((g) => (
+                {generations.slice().sort((a, b) => a.id - b.id).map((g, i) => (
                   <button key={g.id} onClick={() => handleChoose(g)}
-                    className={`flex-shrink-0 w-20 h-20 rounded-lg overflow-hidden ring-2 transition-all ${
+                    title={g.kind === 'edit' ? (g.prompt ? 'Edit: ' + g.prompt : 'Edit') : 'Original concept'}
+                    className={`relative flex-shrink-0 w-20 h-20 rounded-lg overflow-hidden ring-2 transition-all ${
                       chosen?.id === g.id ? 'ring-primary' : 'ring-transparent hover:ring-primary/40'
                     }`}>
-                    <img src={g.output_image_url} alt="Edit" className="w-full h-full object-cover" />
+                    <img src={g.output_image_url} alt={g.kind === 'edit' ? 'Edit version' : 'Original'} className="w-full h-full object-cover" />
+                    <span className="absolute bottom-0 inset-x-0 bg-black/55 text-white text-[9px] font-label text-center py-0.5 leading-tight">v{i + 1}</span>
                   </button>
                 ))}
               </div>
