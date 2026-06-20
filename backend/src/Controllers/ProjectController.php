@@ -202,7 +202,9 @@ class ProjectController
             $updates[] = 'title = ?';
             $bindings[] = trim($data['title']);
         }
-        if (isset($data['status']) && in_array($data['status'], self::VALID_STATUSES, true)) {
+        // Only user-settable statuses; 'generating'/'exported' are driven by the
+        // generate/export flows and must not be forced directly via PATCH.
+        if (isset($data['status']) && in_array($data['status'], ['draft', 'editing', 'archived'], true)) {
             $updates[] = 'status = ?';
             $bindings[] = $data['status'];
         }

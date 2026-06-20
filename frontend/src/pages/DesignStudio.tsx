@@ -158,7 +158,17 @@ export function DesignStudio() {
       let done = false;
       for (let i = 0; i < 240; i++) {
         await new Promise((r) => setTimeout(r, 2500));
-        const status = await api.getJobStatus(jobId);
+        let status;
+        try {
+          status = await api.getJobStatus(jobId);
+        } catch {
+          continue; // transient poll error — keep waiting, the job is still running
+        }
+        if (status.status === 'completed' && status.result?.placeholder) {
+          setChatMessages((prev) => [...prev.slice(0, -1), { role: 'assistant', text: `The model is currently unavailable${status.result?.error ? ` (${status.result.error})` : ''} — please try again.` }]);
+          done = true;
+          break;
+        }
         if (status.status === 'completed' && status.result?.images?.[0]) {
           // Refresh generations from backend so we get the saved image URL.
           const list = await api.listGenerations(parseInt(projectId));
@@ -197,6 +207,10 @@ export function DesignStudio() {
     setConfirmRegenerate(false);
     setError('');
     setChatMessages([]);
+    // Clear the old concepts/chosen immediately so the studio shows progress (not the
+    // stale design) — the backend also deletes them when the new job is accepted.
+    setGenerations([]);
+    setChosen(null);
     initialKickRef.current = true;
     autoChosenRef.current = false;
     const cfg = (project.config || {}) as any;

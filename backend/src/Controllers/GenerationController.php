@@ -37,7 +37,7 @@ class GenerationController
 
         $payload = [
             'prompt' => $prompt,
-            'num_concepts' => max(1, min(4, (int) ($config['numConcepts'] ?? ($data['num_concepts'] ?? 1)))),
+            'num_concepts' => max(1, min(6, (int) ($config['numConcepts'] ?? ($data['num_concepts'] ?? 1)))),
             'width' => (int) ($data['width'] ?? 1024),
             'height' => (int) ($data['height'] ?? 1024),
             'steps' => (int) ($data['steps'] ?? 8),
@@ -49,13 +49,30 @@ class GenerationController
 
         $jobId = $this->aiPostAsync('/api/generate/async', $payload);
 
-        $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = ?, updated_at = NOW() WHERE id = ?');
-        $stmt->execute(['generating', $jobId, $projectId]);
+        // Only flip the project into "generating" if the worker actually accepted the
+        // job. Otherwise a transient AI outage would brick the project in a state with
+        // no recovery path. Also stash the prompt to label the resulting generation.
+        if ($jobId) {
+            // A new generation run replaces the project's existing concepts/edits, so
+            // clear them (and their files) and unselect the chosen design. This is what
+            // the "regenerate replaces current concepts" confirmation promises.
+            $old = $db->prepare('SELECT output_image_url FROM generations WHERE project_id = ?');
+            $old->execute([$projectId]);
+            foreach ($old->fetchAll() as $g) {
+                $u = (string) ($g['output_image_url'] ?? '');
+                if (str_starts_with($u, '/uploads/')) {
+                    $f = $this->uploadsDir() . substr($u, strlen('/uploads'));
+                    if (is_file($f)) {
+                        @unlink($f);
+                    }
+                }
+            }
+            $db->prepare('DELETE FROM generations WHERE project_id = ?')->execute([$projectId]);
 
-        // Stash the prompt so we can label generations when the job finishes.
-        $config['_last_prompt'] = $prompt;
-        $stmt = $db->prepare('UPDATE projects SET config_json = ? WHERE id = ?');
-        $stmt->execute([json_encode($config), $projectId]);
+            $config['_last_prompt'] = $prompt;
+            $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = ?, config_json = ?, chosen_generation_id = NULL, updated_at = NOW() WHERE id = ?');
+            $stmt->execute(['generating', $jobId, json_encode($config), $projectId]);
+        }
 
         return $this->json($response, [
             'job_id' => $jobId,
@@ -117,8 +134,16 @@ class GenerationController
 
         $jobId = $this->aiPostAsync('/api/edit/async', $payload);
 
-        $stmt = $db->prepare('UPDATE projects SET ai_job_id = ?, status = ?, updated_at = NOW() WHERE id = ?');
-        $stmt->execute([$jobId, 'generating', $projectId]);
+        // Only mark generating on a real job; label the resulting generation with the
+        // edit instruction (not the previous generate prompt).
+        if ($jobId) {
+            $cfgStmt = $db->prepare('SELECT config_json FROM projects WHERE id = ?');
+            $cfgStmt->execute([$projectId]);
+            $cfg = json_decode(($cfgStmt->fetch()['config_json'] ?? '{}'), true) ?: [];
+            $cfg['_last_prompt'] = $prompt;
+            $stmt = $db->prepare('UPDATE projects SET ai_job_id = ?, status = ?, config_json = ?, updated_at = NOW() WHERE id = ?');
+            $stmt->execute([$jobId, 'generating', json_encode($cfg), $projectId]);
+        }
 
         return $this->json($response, [
             'job_id' => $jobId,
@@ -250,8 +275,13 @@ class GenerationController
         $jobStatus = $data['status'] ?? '';
 
         if ($code === 404 || $jobStatus === 'failed') {
-            $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = NULL, updated_at = NOW() WHERE id = ?');
-            $stmt->execute(['draft', $projectId]);
+            // Clear only THIS job (a newer one may already be queued), and don't knock a
+            // project that already has saved designs back to draft.
+            $cnt = $db->prepare('SELECT COUNT(*) FROM generations WHERE project_id = ?');
+            $cnt->execute([$projectId]);
+            $newStatus = ((int) $cnt->fetchColumn() > 0) ? 'editing' : 'draft';
+            $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = NULL, updated_at = NOW() WHERE id = ? AND ai_job_id = ?');
+            $stmt->execute([$newStatus, $projectId, $project['ai_job_id']]);
             return;
         }
         if ($jobStatus !== 'completed') {
@@ -281,7 +311,9 @@ class GenerationController
         }
 
         $config = json_decode($project['config_json'] ?? '{}', true) ?: [];
-        $prompt = (string) ($config['_last_prompt'] ?? 'Generated design');
+        // Prefer the AI's enhanced prompt (when enhance was on) over the raw input.
+        $enhanced = trim((string) ($result['enhanced_prompt'] ?? ''));
+        $prompt = $enhanced !== '' ? $enhanced : (string) ($config['_last_prompt'] ?? 'Generated design');
         $kind = ($data['type'] ?? 'generate') === 'edit' ? 'edit' : 'concept';
         $model = (string) ($data['result']['model'] ?? 'sensenova-u1');
         $width = (int) ($data['result']['width'] ?? 1024);
@@ -315,7 +347,11 @@ class GenerationController
             $insert->execute([$projectId, $parentId, $prompt, $model, $kind, '', $width, $height]);
             $genId = (int) $db->lastInsertId();
             $filename = 'generation_' . $genId . '.png';
-            file_put_contents($projectDir . '/' . $filename, $bytes);
+            if (file_put_contents($projectDir . '/' . $filename, $bytes) === false) {
+                // Don't leave a generation row pointing at a file we couldn't write.
+                $db->prepare('DELETE FROM generations WHERE id = ?')->execute([$genId]);
+                continue;
+            }
             $publicUrl = '/uploads/projects/' . $projectId . '/' . $filename;
             $update = $db->prepare('UPDATE generations SET output_image_url = ? WHERE id = ?');
             $update->execute([$publicUrl, $genId]);

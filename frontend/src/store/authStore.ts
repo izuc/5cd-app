@@ -26,7 +26,9 @@ const TOKEN_KEY = '5cd-single-token';
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
   token: localStorage.getItem(TOKEN_KEY),
-  loading: false,
+  // If a token exists at boot, stay in "loading" until fetchUser validates it so
+  // ProtectedRoute doesn't flash protected content with a stale/invalid token.
+  loading: !!localStorage.getItem(TOKEN_KEY),
 
   login: async (email, password) => {
     const res = await api.login({ email, password });

@@ -26,7 +26,8 @@ export function ExportCheckout() {
 
   useEffect(() => {
     if (!projectId) return;
-    api.getProject(parseInt(projectId)).then((res) => setProject(res.project)).catch(() => {});
+    api.getProject(parseInt(projectId)).then((res) => setProject(res.project))
+      .catch((err) => setError(err?.message || 'Could not load this project.'));
   }, [projectId]);
 
   const handleExport = async () => {
@@ -90,7 +91,7 @@ export function ExportCheckout() {
             {EXPORT_OPTIONS.map((opt) => {
               const active = selected === opt.format;
               return (
-                <button key={opt.format} onClick={() => setSelected(opt.format)}
+                <button key={opt.format} onClick={() => { setSelected(opt.format); setExportResult(null); setError(''); }}
                   className={`text-left p-4 rounded-2xl border-2 transition-all ${
                     active ? 'border-primary bg-primary-container/20' : 'border-surface-container-high bg-surface-container-lowest hover:bg-surface-container-low'
                   }`}>

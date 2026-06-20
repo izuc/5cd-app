@@ -27,7 +27,8 @@ export function Billing() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api.getCreditHistory().then((res) => setTransactions(res.transactions || [])).catch(() => {});
+    api.getCreditHistory().then((res) => setTransactions(res.transactions || []))
+      .catch((err) => setError(err?.message || 'Could not load transaction history.'));
   }, []);
 
   const handlePurchase = async (bundle: string) => {

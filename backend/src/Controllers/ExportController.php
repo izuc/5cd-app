@@ -26,50 +26,47 @@ class ExportController
         $cost = self::FORMATS[$format];
 
         $db = Database::getConnection();
-        $db->beginTransaction();
+
+        // 1. Resolve and validate the source (cheap reads, no lock held).
+        $stmt = $db->prepare('SELECT p.chosen_generation_id, u.credits FROM projects p
+                              JOIN users u ON u.id = p.user_id WHERE p.id = ? AND p.user_id = ?');
+        $stmt->execute([$projectId, $userId]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return $this->json($response, ['error' => true, 'message' => 'Project not found'], 404);
+        }
+        if (empty($row['chosen_generation_id'])) {
+            return $this->json($response, ['error' => true, 'message' => 'No chosen design to export'], 400);
+        }
+        if ($cost > 0 && (int) $row['credits'] < $cost) {
+            return $this->json($response, ['error' => true, 'message' => 'Insufficient credits'], 402);
+        }
+
+        $stmt = $db->prepare('SELECT output_image_url FROM generations WHERE id = ? AND project_id = ?');
+        $stmt->execute([$row['chosen_generation_id'], $projectId]);
+        $gen = $stmt->fetch();
+        if (!$gen || empty($gen['output_image_url'])) {
+            return $this->json($response, ['error' => true, 'message' => 'Source image missing'], 404);
+        }
+
+        $uploadsDir = $this->uploadsDir();
+        // Strip only the leading "/uploads" prefix (global str_replace was fragile).
+        $relative = preg_replace('#^/uploads#', '', preg_replace('/\?.*$/', '', $gen['output_image_url']));
+        $sourcePath = $uploadsDir . $relative;
+        if (!is_file($sourcePath)) {
+            return $this->json($response, ['error' => true, 'message' => 'Source file missing on disk'], 404);
+        }
+
+        $exportDir = $uploadsDir . '/projects/' . $projectId . '/exports';
+        if (!is_dir($exportDir) && !mkdir($exportDir, 0755, true) && !is_dir($exportDir)) {
+            return $this->json($response, ['error' => true, 'message' => 'Could not create export directory'], 500);
+        }
+
+        // 2. Generate the export file OUTSIDE any transaction (the slow part) so we
+        // don't hold a row lock across image/PDF processing.
+        $filename = 'export_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $format;
+        $diskPath = $exportDir . '/';
         try {
-            $stmt = $db->prepare('SELECT p.id, p.chosen_generation_id, u.credits FROM projects p
-                                  JOIN users u ON u.id = p.user_id WHERE p.id = ? AND p.user_id = ? FOR UPDATE');
-            $stmt->execute([$projectId, $userId]);
-            $row = $stmt->fetch();
-            if (!$row) {
-                $db->rollBack();
-                return $this->json($response, ['error' => true, 'message' => 'Project not found'], 404);
-            }
-            if ($cost > 0 && (int) $row['credits'] < $cost) {
-                $db->rollBack();
-                return $this->json($response, ['error' => true, 'message' => 'Insufficient credits'], 402);
-            }
-            if (empty($row['chosen_generation_id'])) {
-                $db->rollBack();
-                return $this->json($response, ['error' => true, 'message' => 'No chosen design to export'], 400);
-            }
-
-            $stmt = $db->prepare('SELECT output_image_url FROM generations WHERE id = ? AND project_id = ?');
-            $stmt->execute([$row['chosen_generation_id'], $projectId]);
-            $gen = $stmt->fetch();
-            if (!$gen || empty($gen['output_image_url'])) {
-                $db->rollBack();
-                return $this->json($response, ['error' => true, 'message' => 'Source image missing'], 404);
-            }
-
-            $uploadsDir = $this->uploadsDir();
-            $sourcePath = $uploadsDir . str_replace('/uploads', '', preg_replace('/\?.*$/', '', $gen['output_image_url']));
-            if (!is_file($sourcePath)) {
-                $db->rollBack();
-                return $this->json($response, ['error' => true, 'message' => 'Source file missing on disk'], 404);
-            }
-
-            $exportDir = $uploadsDir . '/projects/' . $projectId . '/exports';
-            if (!is_dir($exportDir) && !mkdir($exportDir, 0755, true) && !is_dir($exportDir)) {
-                throw new \RuntimeException('Could not create export directory');
-            }
-
-            // Random suffix avoids same-second filename collisions overwriting prior exports.
-            $filename = 'export_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $format;
-            $publicPath = '/uploads/projects/' . $projectId . '/exports/';
-            $diskPath = $exportDir . '/';
-
             switch ($format) {
                 case 'png':
                     $outName = $filename . '.png';
@@ -90,19 +87,27 @@ class ExportController
                     $this->makePdf($sourcePath, $diskPath . $outName);
                     break;
                 default:
-                    $db->rollBack();
                     return $this->json($response, ['error' => true, 'message' => 'Unsupported format'], 400);
             }
+        } catch (\Throwable $e) {
+            return $this->json($response, ['error' => true, 'message' => 'Export failed: ' . $e->getMessage()], 500);
+        }
 
-            $fileUrl = $publicPath . $outName;
-            $stmt = $db->prepare(
-                'INSERT INTO exports (project_id, generation_id, format, file_url, credits_used, created_at)
-                 VALUES (?, ?, ?, ?, ?, NOW())'
-            );
-            $stmt->execute([$projectId, $row['chosen_generation_id'], $format, $fileUrl, $cost]);
-            $exportId = (int) $db->lastInsertId();
+        $destPath = $diskPath . $outName;
+        $fileUrl = '/uploads/projects/' . $projectId . '/exports/' . $outName;
 
+        // 3. Short transaction: re-check credits under lock, deduct, and record.
+        $db->beginTransaction();
+        try {
             if ($cost > 0) {
+                $stmt = $db->prepare('SELECT credits FROM users WHERE id = ? FOR UPDATE');
+                $stmt->execute([$userId]);
+                $u = $stmt->fetch();
+                if (!$u || (int) $u['credits'] < $cost) {
+                    $db->rollBack();
+                    @unlink($destPath);
+                    return $this->json($response, ['error' => true, 'message' => 'Insufficient credits'], 402);
+                }
                 $stmt = $db->prepare('UPDATE users SET credits = credits - ? WHERE id = ?');
                 $stmt->execute([$cost, $userId]);
                 $stmt = $db->prepare(
@@ -112,23 +117,32 @@ class ExportController
                 $stmt->execute([$userId, -$cost, 'export-' . $format, $projectId]);
             }
 
+            $stmt = $db->prepare(
+                'INSERT INTO exports (project_id, generation_id, format, file_url, credits_used, created_at)
+                 VALUES (?, ?, ?, ?, ?, NOW())'
+            );
+            $stmt->execute([$projectId, $row['chosen_generation_id'], $format, $fileUrl, $cost]);
+            $exportId = (int) $db->lastInsertId();
+
             $stmt = $db->prepare('UPDATE projects SET status = ?, updated_at = NOW() WHERE id = ?');
             $stmt->execute(['exported', $projectId]);
 
             $db->commit();
-            return $this->json($response, [
-                'export' => [
-                    'id' => $exportId,
-                    'project_id' => $projectId,
-                    'format' => $format,
-                    'file_url' => $fileUrl,
-                    'credits_used' => $cost,
-                ],
-            ], 201);
         } catch (\Throwable $e) {
             $db->rollBack();
+            @unlink($destPath);
             return $this->json($response, ['error' => true, 'message' => 'Export failed: ' . $e->getMessage()], 500);
         }
+
+        return $this->json($response, [
+            'export' => [
+                'id' => $exportId,
+                'project_id' => $projectId,
+                'format' => $format,
+                'file_url' => $fileUrl,
+                'credits_used' => $cost,
+            ],
+        ], 201);
     }
 
     public function listForUser(Request $request, Response $response): Response
@@ -229,6 +243,10 @@ class ExportController
         $objects[4] = "<< /Length " . strlen($contentStream) . " >>\nstream\n" . $contentStream . "endstream";
         $objects[3] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {$pageW} {$pageH}] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>";
         $objects[5] = "<< /Type /XObject /Subtype /Image /Width {$w} /Height {$h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " . strlen($jpeg) . " >>\nstream\n" . $jpeg . "\nendstream";
+
+        // Emit objects and the xref table in object-number order so byte offsets line
+        // up with their xref slots (objects 3 and 4 are defined out of order above).
+        ksort($objects);
 
         $output = "%PDF-1.4\n";
         $offsets = [0];

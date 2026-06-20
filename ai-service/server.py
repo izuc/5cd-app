@@ -375,7 +375,7 @@ def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: flo
             think_mode=think_mode,
         )
     # think_mode=True returns (tensor, think_text); otherwise just tensor.
-    tensor, think_text = out if think_mode else (out, "")
+    tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
     return _denorm_to_pil(tensor), think_text
 
 
@@ -399,7 +399,7 @@ def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: in
             seed=seed,
             think_mode=think_mode,
         )
-    tensor, think_text = out if think_mode else (out, "")
+    tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
     return _denorm_to_pil(tensor), think_text
 
 
@@ -593,6 +593,8 @@ def _process_generate(job: Job) -> None:
 
     images_b64: list[str] = []
     think_texts: list[str] = []
+    real_count = 0
+    last_error = ""
 
     for i in range(num):
         seed = int(base_seed) + i
@@ -602,12 +604,12 @@ def _process_generate(job: Job) -> None:
                                            steps=steps, cfg_scale=cfg, seed=seed,
                                            batch_size=1, think_mode=think_flag)
                 img = pil[0]
+                real_count += 1
             except Exception as e:  # noqa: BLE001
-                # Mark the model unhealthy and fall back for the rest of this batch.
-                global _pipeline, _pipeline_error
-                _pipeline_error = f"Inference failed: {e}"
-                _pipeline = None
-                have_model = False
+                # Fall back to a placeholder for THIS concept only; keep the model
+                # loaded so the rest of the batch (and future jobs) still use it.
+                last_error = f"Inference failed: {e}"
+                print(f"[ai] {job.id} concept {i} failed: {e}")
                 img = _placeholder_image(prompt, width, height, seed)
                 think_text = ""
         else:
@@ -617,17 +619,19 @@ def _process_generate(job: Job) -> None:
         think_texts.append(think_text)
         job.progress = int(((i + 1) / num) * 100)
 
+    # The whole job is "placeholder" only if NO real concept was produced.
+    placeholder = real_count == 0
     job.result = {
         "images": images_b64,
         "think": think_texts,
         "enhanced_prompt": enhanced_prompt,
-        "model": "sensenova-u1" if have_model else "placeholder",
+        "model": "placeholder" if placeholder else "sensenova-u1",
         "width": width,
         "height": height,
         "steps": steps,
         "cfg_scale": cfg,
-        "placeholder": not have_model,
-        "error": _pipeline_error if not have_model else "",
+        "placeholder": placeholder,
+        "error": (_pipeline_error or last_error) if placeholder else "",
     }
 
 
@@ -861,7 +865,7 @@ app = FastAPI(title="5cd-single AI Worker", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # worker is called server-to-server; no cookies/credentials, and '*' + credentials is invalid
     allow_methods=["*"],
     allow_headers=["*"],
 )

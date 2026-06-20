@@ -65,18 +65,22 @@ return function (App $app) {
     $app->get('/uploads/{path:.*}', function ($request, $response, $args) {
         $uploadsDir = realpath(Paths::uploads());
         $filePath = $uploadsDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $args['path']);
-        if (!$uploadsDir || !is_file($filePath) || strpos(realpath($filePath), $uploadsDir) !== 0) {
+        $real = $uploadsDir ? realpath($filePath) : false;
+        // Confine to the uploads dir with a trailing separator so a sibling such as
+        // "<uploads>-backups" cannot satisfy the prefix check (path traversal).
+        if ($real === false || !is_file($real)
+            || strncmp($real, $uploadsDir . DIRECTORY_SEPARATOR, strlen($uploadsDir) + 1) !== 0) {
             $response->getBody()->write(json_encode(['error' => 'File not found']));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
         }
-        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+        $ext = strtolower(pathinfo($real, PATHINFO_EXTENSION));
         $mimes = [
             'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg',
             'webp' => 'image/webp', 'svg' => 'image/svg+xml',
             'pdf' => 'application/pdf', 'json' => 'application/json',
         ];
         $mime = $mimes[$ext] ?? 'application/octet-stream';
-        $response->getBody()->write(file_get_contents($filePath));
+        $response->getBody()->write(file_get_contents($real));
         return $response->withHeader('Content-Type', $mime)->withHeader('Cache-Control', 'public, max-age=86400');
     });
 };
