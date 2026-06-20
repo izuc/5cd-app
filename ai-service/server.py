@@ -61,8 +61,8 @@ GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
 DEVICE = os.getenv("DEVICE", "cuda")
 DTYPE_NAME = os.getenv("DTYPE", "bfloat16")
 DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "8"))
-DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "4.0"))
-DEFAULT_CFG_NORM = os.getenv("CFG_NORM", "cfg_zero_star")  # none | global | channel | cfg_zero_star
+DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "1.0"))  # 8-step model's official cfg (4.0 is the base model)
+DEFAULT_CFG_NORM = os.getenv("CFG_NORM", "none")  # none | global | channel | cfg_zero_star
 DEFAULT_TIMESTEP_SHIFT = float(os.getenv("DEFAULT_TIMESTEP_SHIFT", "3.0"))
 DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
@@ -360,7 +360,7 @@ def _run_enhance(prompt: str, design_type: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: float,
              seed: int, batch_size: int, think_mode: bool = True,
-             cfg_norm: str = "none") -> tuple[list[Image.Image], str]:
+             cfg_norm: str = "none", timestep_shift: float = DEFAULT_TIMESTEP_SHIFT) -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
     with _torch.inference_mode():
         out = model.t2i_generate(
@@ -369,7 +369,7 @@ def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: flo
             image_size=(width, height),
             cfg_scale=cfg_scale,
             cfg_norm=cfg_norm,
-            timestep_shift=DEFAULT_TIMESTEP_SHIFT,
+            timestep_shift=timestep_shift,
             cfg_interval=(0.0, 1.0),
             num_steps=steps,
             batch_size=batch_size,
@@ -383,7 +383,8 @@ def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: flo
 
 def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: int, *,
               steps: int, cfg_scale: float, img_cfg_scale: float, seed: int,
-              think_mode: bool = True, cfg_norm: str = "none") -> tuple[list[Image.Image], str]:
+              think_mode: bool = True, cfg_norm: str = "none",
+              timestep_shift: float = DEFAULT_TIMESTEP_SHIFT) -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
     with _torch.inference_mode():
         out = model.it2i_generate(
@@ -394,7 +395,7 @@ def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: in
             cfg_scale=cfg_scale,
             img_cfg_scale=img_cfg_scale,
             cfg_norm=cfg_norm,
-            timestep_shift=DEFAULT_TIMESTEP_SHIFT,
+            timestep_shift=timestep_shift,
             cfg_interval=(0.0, 1.0),
             num_steps=steps,
             batch_size=1,
@@ -573,6 +574,7 @@ def _process_generate(job: Job) -> None:
     steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 100))
     cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE))
     cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
+    ts_shift = float(p.get("timestep_shift") or DEFAULT_TIMESTEP_SHIFT)
     enhance = bool(p.get("enhance"))
     think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
     design_type = p.get("design_type")
@@ -605,7 +607,8 @@ def _process_generate(job: Job) -> None:
             try:
                 pil, think_text = _run_t2i(prompt, width, height,
                                            steps=steps, cfg_scale=cfg, seed=seed,
-                                           batch_size=1, think_mode=think_flag, cfg_norm=cfg_norm)
+                                           batch_size=1, think_mode=think_flag, cfg_norm=cfg_norm,
+                                           timestep_shift=ts_shift)
                 img = pil[0]
                 real_count += 1
             except Exception as e:  # noqa: BLE001
@@ -655,6 +658,7 @@ def _process_edit(job: Job) -> None:
     cfg = float(p.get("cfg_scale") or DEFAULT_CFG_SCALE)
     img_cfg = float(p.get("img_cfg_scale") or 1.0)
     cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
+    ts_shift = float(p.get("timestep_shift") or DEFAULT_TIMESTEP_SHIFT)
     think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
     seed = p.get("seed")
     if seed is None:
@@ -666,7 +670,8 @@ def _process_edit(job: Job) -> None:
         try:
             pil, think_text = _run_edit(prompt, refs, width, height,
                                         steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg,
-                                        seed=int(seed), think_mode=think_flag, cfg_norm=cfg_norm)
+                                        seed=int(seed), think_mode=think_flag, cfg_norm=cfg_norm,
+                                        timestep_shift=ts_shift)
             img = pil[0]
         except Exception as e:  # noqa: BLE001
             global _pipeline, _pipeline_error
@@ -835,6 +840,7 @@ class GenerateRequest(BaseModel):
     steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
     cfg_scale: float = DEFAULT_CFG_SCALE
     cfg_norm: Optional[str] = None     # none|global|channel|cfg_zero_star; None = server default
+    timestep_shift: Optional[float] = None  # None = server default
     seed: Optional[int] = None
     enhance: bool = False
     think: Optional[bool] = None       # override THINK_MODE per request; None = server default
@@ -850,6 +856,7 @@ class EditRequest(BaseModel):
     cfg_scale: float = DEFAULT_CFG_SCALE
     img_cfg_scale: float = 1.0
     cfg_norm: Optional[str] = None     # none|global|channel|cfg_zero_star; None = server default
+    timestep_shift: Optional[float] = None  # None = server default
     seed: Optional[int] = None
     think: Optional[bool] = None       # override THINK_MODE per request; None = server default
 

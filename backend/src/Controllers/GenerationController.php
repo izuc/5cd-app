@@ -41,7 +41,7 @@ class GenerationController
             'width' => (int) ($data['width'] ?? 1024),
             'height' => (int) ($data['height'] ?? 1024),
             'steps' => (int) ($data['steps'] ?? 8),
-            'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
+            'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
             'enhance' => (bool) ($data['enhance'] ?? $config['enhance'] ?? false),
             'design_type' => $project['type'] ?: null,
@@ -128,7 +128,7 @@ class GenerationController
             'prompt' => $prompt,
             'ref_images' => [base64_encode($bytes)],
             'steps' => (int) ($data['steps'] ?? 8),
-            'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
+            'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
             'img_cfg_scale' => (float) ($data['img_cfg_scale'] ?? 1.0),
         ];
 
