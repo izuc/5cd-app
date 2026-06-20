@@ -58,6 +58,9 @@ from pydantic import BaseModel, Field
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(HERE, "models"))
 GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
+# Optional kohya-style LoRA (safetensors) folded into the GGUF weights at load
+# time — e.g. the 8-step Infographic distill LoRA. Empty = no LoRA.
+LORA_FILE = os.getenv("LORA_FILE", "")
 DEVICE = os.getenv("DEVICE", "cuda")
 DTYPE_NAME = os.getenv("DTYPE", "bfloat16")
 DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "8"))
@@ -176,6 +179,13 @@ def _load_pipeline() -> bool:
     print(f"[ai] Loading GGUF weights: {gguf_path}")
     try:
         sd = _load_gguf_state_dict(gguf_path)
+        if LORA_FILE:
+            lora_path = os.path.join(MODELS_DIR, LORA_FILE)
+            if os.path.isfile(lora_path):
+                print(f"[ai] Applying LoRA: {lora_path}")
+                sd = _apply_lora_to_gguf_sd(sd, lora_path, dtype)
+            else:
+                print(f"[ai] LoRA file not found, skipping: {lora_path}")
         _set_gguf_into_meta_model(model, sd, dtype, torch.device("cpu"))
         del sd
         gc.collect()
@@ -260,6 +270,48 @@ def _set_gguf_into_meta_model(meta_model, state_dict, dtype, device) -> None:
         dtype=dtype,
     )
     quantizer._process_model_after_weight_loading(meta_model)
+
+
+def _apply_lora_to_gguf_sd(state_dict: dict, lora_path: str, dtype) -> dict:
+    """Fold a kohya-style safetensors LoRA into a GGUF state dict at load time.
+
+    Mirrors ComfyUI_SenseNova_U1's apply_loras_gguf: for each base weight with a
+    matching {prefix}.lora_down/.lora_up/.alpha, dequantize the GGUF tensor and add
+    delta_W = (alpha/rank) * (up @ down). Touched tensors come out dequantized at
+    compute dtype; everything else stays GGUF-quantized.
+    """
+    import torch
+    from safetensors.torch import safe_open
+    from diffusers.quantizers.gguf.utils import dequantize_gguf_tensor
+
+    lora_sd: dict = {}
+    with safe_open(lora_path, framework="pt", device="cpu") as f:
+        for k in f.keys():
+            lora_sd[k] = f.get_tensor(k)
+
+    applied = 0
+    out: dict = {}
+    for key, weight in state_dict.items():
+        prefix = key[: -len(".weight")] if key.endswith(".weight") else None
+        down = lora_sd.get(f"{prefix}.lora_down.weight") if prefix else None
+        if weight is None or down is None:
+            out[key] = weight
+            continue
+        up = lora_sd[f"{prefix}.lora_up.weight"]
+        rank = down.shape[0]
+        alpha = float(lora_sd.get(f"{prefix}.alpha", rank))
+        delta = (alpha / rank) * torch.matmul(up.float(), down.float())
+        if getattr(weight, "quant_type", None) is not None:
+            base = dequantize_gguf_tensor(weight).to(torch.float32)
+        else:
+            base = weight.to(torch.float32)
+        out[key] = (base + delta).to(dtype)
+        del base, delta
+        applied += 1
+    print(f"[ai] LoRA merged into {applied} tensors from {os.path.basename(lora_path)}")
+    del lora_sd
+    gc.collect()
+    return out
 
 
 # ---------------------------------------------------------------------------
