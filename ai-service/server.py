@@ -267,92 +267,34 @@ def _set_gguf_into_meta_model(meta_model, state_dict, dtype, device) -> None:
 # ---------------------------------------------------------------------------
 # Prompt enhancement (uses the local model — no external API)
 # ---------------------------------------------------------------------------
-# Per-design-type system prompts for in-process prompt expansion. The upstream
-# `PromptEnhancer` only ships an "infographic" template which doesn't suit
-# logos / banners / flyers, so we author our own and call the SenseNova-U1
-# language model directly via `model.language_model.generate(...)`.
-_ENHANCE_SYSTEM_PROMPTS: dict[str, str] = {
-    "logo": (
-        "You are a senior brand designer writing prompts for a text-to-image model. "
-        "Expand the user's idea into one tightly-written paragraph (60-100 words) that describes "
-        "a single logo composition: subject, silhouette, color palette (2-3 colors named), "
-        "line weight, geometry, background, and overall feeling. Logos are SIMPLE — no scenes, "
-        "no busy backgrounds, no text unless the user specifically asked for a wordmark. "
-        "Output only the prompt itself with no preamble, no headings, no quotes."
-    ),
-    "social": (
-        "You are an art director for a brand social-media account writing prompts for a "
-        "text-to-image model. Expand the user's idea into one paragraph (80-130 words) describing "
-        "a single eye-catching square social post: hero subject, color palette, layout (where "
-        "the focal point sits), typography style if text appears, lighting, and mood. Quote any "
-        "text that should appear in the image. Output only the prompt itself with no preamble."
-    ),
-    "banner": (
-        "You are a senior web designer writing prompts for a text-to-image model. Expand the "
-        "user's idea into one paragraph (80-130 words) describing a wide hero banner: hero "
-        "subject placement (left / center / right), background atmosphere, color palette, "
-        "lighting, depth, and any typography (quote the actual text). Banners reward clear "
-        "negative space for headlines. Output only the prompt itself with no preamble."
-    ),
-    "flyer": (
-        "You are a print designer writing prompts for a text-to-image model. Expand the user's "
-        "idea into one paragraph (100-150 words) describing a single flyer: layout (header, "
-        "hero, body, footer), typography hierarchy, color palette, illustration / photography "
-        "style, and any quoted text that should appear. Be specific about font character "
-        "(e.g. condensed grotesk, fat serif, hand-painted brush). Output only the prompt itself."
-    ),
-    "custom": (
-        "You are an experienced art director writing prompts for a text-to-image model. "
-        "Expand the user's idea into one paragraph (80-150 words) describing a single image: "
-        "subject, composition, color palette (named, 2-4 colors), lighting, materials and "
-        "textures, and overall mood. Quote any text that should appear. Output only the prompt "
-        "itself with no preamble, no headings, no quotes around the whole thing."
-    ),
+# Deterministic prompt enhancement: append design-type style guidance. SenseNova-U1's
+# direct language-model text path produces degenerate output under GGUF quantization
+# (its image path is fine), so we use a fast, reliable template instead of an LLM
+# rewrite — instant and never garbage.
+# Visual style cues appended for enhancement. ONLY for design types where this
+# model won't paint the cues as literal text. Text-heavy types (flyer/social/
+# banner) are deliberately excluded — there the model renders appended words onto
+# the design, so those use the user's prompt as-is.
+_ENHANCE_STYLE: dict[str, str] = {
+    "logo": "flat vector logo, minimal, clean geometric shapes, solid background, high contrast",
+    "custom": "clean balanced composition, rich colour, soft lighting, detailed",
 }
 
 
 def _run_enhance(prompt: str, design_type: str | None = None) -> str:
-    """Expand a short user prompt into a detailed brief for the T2I model.
+    """Augment a short prompt with design-type style guidance.
 
-    Uses the loaded SenseNova-U1 language model standalone (text-only path) —
-    no external API. Returns the expanded prompt; on any failure returns the
-    original prompt so generation still proceeds.
+    Deterministic and instant. SenseNova-U1's direct language-model text path
+    produces degenerate output under GGUF quantization (its image path is fine),
+    so we append curated style keywords rather than a slow, unreliable LLM rewrite.
     """
-    model = _pipeline["model"]
-    device = _pipeline["device"]
-    system_prompt = _ENHANCE_SYSTEM_PROMPTS.get((design_type or "custom").lower(),
-                                                _ENHANCE_SYSTEM_PROMPTS["custom"])
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
-    ]
-    text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = _tokenizer(text, return_tensors="pt").to(device)
-    eos_id = _tokenizer.eos_token_id
-    pad_id = _tokenizer.pad_token_id if _tokenizer.pad_token_id is not None else eos_id
-    with _torch.inference_mode():
-        output = model.language_model.generate(
-            input_ids=inputs.input_ids,
-            attention_mask=inputs.attention_mask,
-            max_new_tokens=400,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.95,
-            top_k=20,
-            repetition_penalty=1.05,
-            eos_token_id=eos_id,
-            pad_token_id=pad_id,
-        )
-    expanded = _tokenizer.decode(
-        output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
-    ).strip()
-    # Strip any wrapping quotes / "Prompt:" prefixes the model might emit.
-    for prefix in ("Prompt:", "prompt:", "PROMPT:"):
-        if expanded.startswith(prefix):
-            expanded = expanded[len(prefix):].strip()
-    if expanded.startswith('"') and expanded.endswith('"'):
-        expanded = expanded[1:-1].strip()
-    return expanded or prompt
+    base = (prompt or "").strip().rstrip(" .,")
+    if not base:
+        return prompt
+    # No entry (flyer/social/banner) => leave the prompt untouched so style cues
+    # aren't rendered as literal text on text-heavy designs.
+    style = _ENHANCE_STYLE.get((design_type or "custom").lower())
+    return f"{base}, {style}" if style else base
 
 
 # ---------------------------------------------------------------------------
@@ -766,7 +708,7 @@ def _process_chat(job: Job) -> None:
                 # Pass attention_mask explicitly and use a distinct pad_token so the
                 # generation can stop on EOS instead of running to max_new_tokens.
                 messages = [{"role": "user", "content": prompt}]
-                text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
                 inputs = _tokenizer(text, return_tensors="pt").to(device)
                 eos_id = _tokenizer.eos_token_id
                 pad_id = _tokenizer.pad_token_id if _tokenizer.pad_token_id is not None else eos_id
