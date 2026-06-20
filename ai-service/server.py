@@ -62,6 +62,7 @@ DEVICE = os.getenv("DEVICE", "cuda")
 DTYPE_NAME = os.getenv("DTYPE", "bfloat16")
 DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "8"))
 DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "4.0"))
+DEFAULT_CFG_NORM = os.getenv("CFG_NORM", "cfg_zero_star")  # none | global | channel | cfg_zero_star
 DEFAULT_TIMESTEP_SHIFT = float(os.getenv("DEFAULT_TIMESTEP_SHIFT", "3.0"))
 DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
@@ -358,7 +359,8 @@ def _run_enhance(prompt: str, design_type: str | None = None) -> str:
 # Diffusion calls (real model path)
 # ---------------------------------------------------------------------------
 def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: float,
-             seed: int, batch_size: int, think_mode: bool = True) -> tuple[list[Image.Image], str]:
+             seed: int, batch_size: int, think_mode: bool = True,
+             cfg_norm: str = "none") -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
     with _torch.inference_mode():
         out = model.t2i_generate(
@@ -366,7 +368,7 @@ def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: flo
             prompt,
             image_size=(width, height),
             cfg_scale=cfg_scale,
-            cfg_norm="none",
+            cfg_norm=cfg_norm,
             timestep_shift=DEFAULT_TIMESTEP_SHIFT,
             cfg_interval=(0.0, 1.0),
             num_steps=steps,
@@ -381,7 +383,7 @@ def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: flo
 
 def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: int, *,
               steps: int, cfg_scale: float, img_cfg_scale: float, seed: int,
-              think_mode: bool = True) -> tuple[list[Image.Image], str]:
+              think_mode: bool = True, cfg_norm: str = "none") -> tuple[list[Image.Image], str]:
     model = _pipeline["model"]
     with _torch.inference_mode():
         out = model.it2i_generate(
@@ -391,7 +393,7 @@ def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: in
             image_size=(width, height),
             cfg_scale=cfg_scale,
             img_cfg_scale=img_cfg_scale,
-            cfg_norm="none",
+            cfg_norm=cfg_norm,
             timestep_shift=DEFAULT_TIMESTEP_SHIFT,
             cfg_interval=(0.0, 1.0),
             num_steps=steps,
@@ -570,6 +572,7 @@ def _process_generate(job: Job) -> None:
     height = _round_to_grid(int(p.get("height", DEFAULT_HEIGHT)))
     steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 100))
     cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE))
+    cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
     enhance = bool(p.get("enhance"))
     think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
     design_type = p.get("design_type")
@@ -602,7 +605,7 @@ def _process_generate(job: Job) -> None:
             try:
                 pil, think_text = _run_t2i(prompt, width, height,
                                            steps=steps, cfg_scale=cfg, seed=seed,
-                                           batch_size=1, think_mode=think_flag)
+                                           batch_size=1, think_mode=think_flag, cfg_norm=cfg_norm)
                 img = pil[0]
                 real_count += 1
             except Exception as e:  # noqa: BLE001
@@ -651,6 +654,7 @@ def _process_edit(job: Job) -> None:
     steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 100))
     cfg = float(p.get("cfg_scale") or DEFAULT_CFG_SCALE)
     img_cfg = float(p.get("img_cfg_scale") or 1.0)
+    cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
     think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
     seed = p.get("seed")
     if seed is None:
@@ -662,7 +666,7 @@ def _process_edit(job: Job) -> None:
         try:
             pil, think_text = _run_edit(prompt, refs, width, height,
                                         steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg,
-                                        seed=int(seed), think_mode=think_flag)
+                                        seed=int(seed), think_mode=think_flag, cfg_norm=cfg_norm)
             img = pil[0]
         except Exception as e:  # noqa: BLE001
             global _pipeline, _pipeline_error
@@ -830,6 +834,7 @@ class GenerateRequest(BaseModel):
     height: int = DEFAULT_HEIGHT
     steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
     cfg_scale: float = DEFAULT_CFG_SCALE
+    cfg_norm: Optional[str] = None     # none|global|channel|cfg_zero_star; None = server default
     seed: Optional[int] = None
     enhance: bool = False
     think: Optional[bool] = None       # override THINK_MODE per request; None = server default
@@ -844,6 +849,7 @@ class EditRequest(BaseModel):
     steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
     cfg_scale: float = DEFAULT_CFG_SCALE
     img_cfg_scale: float = 1.0
+    cfg_norm: Optional[str] = None     # none|global|channel|cfg_zero_star; None = server default
     seed: Optional[int] = None
     think: Optional[bool] = None       # override THINK_MODE per request; None = server default
 
@@ -998,6 +1004,7 @@ async def api_status():
             "height": DEFAULT_HEIGHT,
             "patch_factor": PATCH_FACTOR,
             "think": DEFAULT_THINK,
+            "cfg_norm": DEFAULT_CFG_NORM,
         },
         "queue": {
             "queued": sum(1 for j in _jobs.values() if j.status == "queued"),
