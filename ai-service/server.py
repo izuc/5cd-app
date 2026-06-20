@@ -617,6 +617,18 @@ def _process_generate(job: Job) -> None:
     if base_seed is None:
         base_seed = random.randint(0, 2**31 - 1)
 
+    # Optional reference image(s): generate guided by them (it2i) instead of pure
+    # text-to-image. img_cfg_scale controls how strongly the reference is followed.
+    refs_b64 = p.get("ref_images") or []
+    img_cfg = float(p.get("img_cfg_scale") or 1.0)
+    ref_pils = []
+    if refs_b64:
+        try:
+            ref_pils = [_b64_to_pil(b) for b in refs_b64[:MAX_REF_IMAGES]]
+        except Exception as e:  # noqa: BLE001
+            print(f"[ai] {job.id} ref decode failed, ignoring refs: {e}")
+            ref_pils = []
+
     have_model = _load_pipeline()
 
     # Optionally expand the short user prompt into a full design brief first.
@@ -642,10 +654,16 @@ def _process_generate(job: Job) -> None:
         is_ph = True
         if have_model:
             try:
-                pil, think_text = _run_t2i(prompt, width, height,
-                                           steps=steps, cfg_scale=cfg, seed=seed,
-                                           batch_size=1, think_mode=think_flag, cfg_norm=cfg_norm,
-                                           timestep_shift=ts_shift)
+                if ref_pils:
+                    pil, think_text = _run_edit(prompt, ref_pils, width, height,
+                                                steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg,
+                                                seed=seed, think_mode=think_flag, cfg_norm=cfg_norm,
+                                                timestep_shift=ts_shift)
+                else:
+                    pil, think_text = _run_t2i(prompt, width, height,
+                                               steps=steps, cfg_scale=cfg, seed=seed,
+                                               batch_size=1, think_mode=think_flag, cfg_norm=cfg_norm,
+                                               timestep_shift=ts_shift)
                 img = pil[0]
                 real_count += 1
                 is_ph = False
@@ -889,6 +907,8 @@ class GenerateRequest(BaseModel):
     enhance: bool = False
     think: Optional[bool] = None       # override THINK_MODE per request; None = server default
     design_type: Optional[str] = None  # "logo" | "social" | "banner" | "flyer" | "custom"
+    ref_images: Optional[list[str]] = None  # optional style/subject reference -> it2i-guided generation
+    img_cfg_scale: float = 1.0             # ref adherence when ref_images given (lower = looser style hint)
 
 
 class EditRequest(BaseModel):

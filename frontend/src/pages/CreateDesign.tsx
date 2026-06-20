@@ -98,14 +98,15 @@ export function CreateDesign() {
   const [error, setError] = useState('');
   const [mode, setMode] = useState<'describe' | 'upload'>('describe');
   const [upload, setUpload] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [reference, setReference] = useState<{ name: string; dataUrl: string } | null>(null);
 
-  const onPickFile = (file: File | undefined | null) => {
+  // Read an image, downscale to the model's 2048 sweet spot client-side (keeps the
+  // payload well under the server POST limit + fast), flatten transparency, store it.
+  const readImage = (file: File | undefined | null, set: (v: { name: string; dataUrl: string } | null) => void) => {
     setError('');
     if (!file) return;
     if (!file.type.startsWith('image/')) { setError('Please choose an image file (PNG, JPG, etc.).'); return; }
     if (file.size > 24 * 1024 * 1024) { setError('That image is too large — max 24 MB.'); return; }
-    // Downscale to the model's 2048 sweet spot client-side: keeps the upload
-    // payload small (well under the server's POST limit) and the transfer fast.
     const img = new Image();
     const objUrl = URL.createObjectURL(file);
     img.onload = () => {
@@ -119,11 +120,12 @@ export function CreateDesign() {
       if (!ctx) { setError('Could not process that image.'); return; }
       ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); // flatten transparency onto white
       ctx.drawImage(img, 0, 0, w, h);
-      setUpload({ name: file.name, dataUrl: canvas.toDataURL('image/jpeg', 0.92) });
+      set({ name: file.name, dataUrl: canvas.toDataURL('image/jpeg', 0.92) });
     };
     img.onerror = () => { URL.revokeObjectURL(objUrl); setError('Could not read that image.'); };
     img.src = objUrl;
   };
+  const onPickFile = (file: File | undefined | null) => readImage(file, setUpload);
 
   const sizePreset = SIZE_OPTIONS.find((s) => s.value === size) || SIZE_OPTIONS[0];
   const typeOption = TYPE_OPTIONS.find((t) => t.value === type) || TYPE_OPTIONS[0];
@@ -152,6 +154,7 @@ export function CreateDesign() {
           steps: STEPS,
           width: sizePreset.w,
           height: sizePreset.h,
+          ...(reference ? { referenceImages: [reference.dataUrl] } : {}),
         },
       });
       navigate(`/studio/${project.project.id}`);
@@ -305,6 +308,26 @@ export function CreateDesign() {
             </p>
           </div>
         </label>
+
+        <div className="space-y-2">
+          <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Reference image (optional)</label>
+          {reference ? (
+            <div className="flex items-center gap-3 p-3 rounded-2xl border-2 border-surface-container-high bg-surface-container-lowest">
+              <img src={reference.dataUrl} alt="" className="w-14 h-14 object-contain rounded-lg bg-surface-container flex-shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm truncate">{reference.name}</p>
+                <p className="text-xs text-on-surface-variant">Concepts will be nudged toward this image's style &amp; palette.</p>
+              </div>
+              <button type="button" onClick={() => setReference(null)} className="text-xs text-error hover:underline flex-shrink-0">Remove</button>
+            </div>
+          ) : (
+            <label className="flex items-center gap-2 p-3 rounded-2xl border-2 border-dashed border-surface-container-high bg-surface-container-lowest hover:border-primary/50 cursor-pointer text-on-surface-variant text-sm transition-colors">
+              <Icon name="add_photo_alternate" className="text-xl text-primary" />
+              <span>Attach an image to guide the style</span>
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => readImage(e.target.files?.[0], setReference)} />
+            </label>
+          )}
+        </div>
         </>
         )}
 

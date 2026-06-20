@@ -47,6 +47,15 @@ class GenerationController
             'design_type' => $project['type'] ?: null,
         ];
 
+        // Style reference: if the project has a stored reference image, generate
+        // guided by it (it2i) rather than pure text-to-image. img_cfg 1.0 is the
+        // model's stable point — lower values destabilise 8-step sampling.
+        $refB64 = $this->loadProjectReference($projectId);
+        if ($refB64 !== null) {
+            $payload['ref_images'] = [$refB64];
+            $payload['img_cfg_scale'] = 1.0;
+        }
+
         $jobId = $this->aiPostAsync('/api/generate/async', $payload);
 
         // Only flip the project into "generating" if the worker actually accepted the
@@ -381,6 +390,17 @@ class GenerationController
             $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = NULL, updated_at = NOW() WHERE id = ?');
             $stmt->execute(['editing', $projectId]);
         }
+    }
+
+    /** Base64 of a project's stored style-reference image (references/ref_0.png), or null. */
+    private function loadProjectReference(int $projectId): ?string
+    {
+        $path = $this->uploadsDir() . '/projects/' . $projectId . '/references/ref_0.png';
+        if (!is_file($path)) {
+            return null;
+        }
+        $bytes = @file_get_contents($path);
+        return $bytes !== false ? base64_encode($bytes) : null;
     }
 
     private function aiPostAsync(string $path, array $payload): ?string
