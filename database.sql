@@ -50,6 +50,13 @@ CREATE TABLE `generations` (
   INDEX `idx_project_chosen` (`project_id`, `is_chosen`)
 ) ENGINE=InnoDB;
 
+-- projects.chosen_generation_id references generations. Added after generations
+-- exists (the two tables reference each other). ON DELETE SET NULL so deleting a
+-- generation (e.g. on regenerate) clears the chosen pointer instead of dangling.
+ALTER TABLE `projects`
+  ADD CONSTRAINT `fk_projects_chosen_generation`
+  FOREIGN KEY (`chosen_generation_id`) REFERENCES `generations`(`id`) ON DELETE SET NULL;
+
 CREATE TABLE `exports` (
   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
   `project_id` BIGINT NOT NULL,

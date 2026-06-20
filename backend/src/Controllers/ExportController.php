@@ -66,6 +66,7 @@ class ExportController
         // don't hold a row lock across image/PDF processing.
         $filename = 'export_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $format;
         $diskPath = $exportDir . '/';
+        $outName = '';
         try {
             switch ($format) {
                 case 'png':
@@ -90,6 +91,9 @@ class ExportController
                     return $this->json($response, ['error' => true, 'message' => 'Unsupported format'], 400);
             }
         } catch (\Throwable $e) {
+            if ($outName !== '' && is_file($diskPath . $outName)) {
+                @unlink($diskPath . $outName); // drop any partially-written export file
+            }
             return $this->json($response, ['error' => true, 'message' => 'Export failed: ' . $e->getMessage()], 500);
         }
 
@@ -229,9 +233,14 @@ class ExportController
 
         // Use a JPEG inside the PDF for portability (PDF supports DCTDecode natively).
         $jpegPath = $destPath . '.tmp.jpg';
-        $this->makeJpg($sourcePath, $jpegPath);
-        $jpeg = file_get_contents($jpegPath);
-        @unlink($jpegPath);
+        try {
+            $this->makeJpg($sourcePath, $jpegPath);
+            $jpeg = file_get_contents($jpegPath);
+        } finally {
+            if (is_file($jpegPath)) {
+                @unlink($jpegPath); // always clean up the temp JPEG, even on failure
+            }
+        }
 
         $pageW = $w;
         $pageH = $h;

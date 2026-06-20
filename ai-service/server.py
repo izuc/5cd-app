@@ -660,7 +660,7 @@ def _process_edit(job: Job) -> None:
     width = _round_to_grid(int(p.get("width") or refs[0].width))
     height = _round_to_grid(int(p.get("height") or refs[0].height))
     steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 100))
-    cfg = float(p.get("cfg_scale") or DEFAULT_CFG_SCALE)
+    cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE) or DEFAULT_CFG_SCALE)
     img_cfg = float(p.get("img_cfg_scale") or 1.0)
     cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
     ts_shift = float(p.get("timestep_shift") or DEFAULT_TIMESTEP_SHIFT)
