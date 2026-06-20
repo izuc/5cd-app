@@ -44,19 +44,51 @@ export function DesignStudio() {
     return cgs[0];
   };
 
-  // Rebuild the edit conversation from stored generations so reopening a project
-  // shows the full history (the original, then each edit's instruction + result).
-  const reconstructChat = (gens: Generation[]): ChatMsg[] => {
-    const edits = gens.filter((g) => g.kind === 'edit').slice().sort((a, b) => a.id - b.id);
-    if (edits.length === 0) return [];
-    const msgs: ChatMsg[] = [];
-    const orig = gens.filter((g) => g.kind === 'concept').sort((a, b) => a.id - b.id)[0];
-    if (orig) {
-      msgs.push({ role: 'assistant', text: 'Your original design.', imageUrl: orig.output_image_url + '?t=' + new Date(orig.created_at).getTime() });
+  // The active version lineage: the chain's root concept + its descendant edits,
+  // following parent_generation_id (handles multi-concept projects and revert
+  // branches, rather than naively treating every concept as a version).
+  const buildLineage = (gens: Generation[], current: Generation | null): Generation[] => {
+    if (!gens.length) return [];
+    const byId = new Map(gens.map((g) => [g.id, g] as const));
+    let root: Generation | null =
+      current ||
+      gens.find((g) => g.is_chosen) ||
+      gens.slice().sort((a, b) => b.id - a.id).find((g) => g.kind === 'edit') ||
+      gens.filter((g) => g.kind === 'concept').sort((a, b) => a.id - b.id)[0] ||
+      null;
+    const guard = new Set<number>();
+    while (root && root.parent_generation_id != null && byId.has(root.parent_generation_id) && !guard.has(root.id)) {
+      guard.add(root.id);
+      root = byId.get(root.parent_generation_id)!;
     }
-    for (const g of edits) {
+    if (!root) return [];
+    const inChain = new Set<number>([root.id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const g of gens) {
+        if (!inChain.has(g.id) && g.parent_generation_id != null && inChain.has(g.parent_generation_id)) {
+          inChain.add(g.id);
+          grew = true;
+        }
+      }
+    }
+    return gens.filter((g) => inChain.has(g.id)).sort((a, b) => a.id - b.id);
+  };
+
+  // Rebuild the edit conversation from the lineage so reopening a project shows the
+  // full history (the original, then each edit's instruction + its resulting image).
+  const reconstructChat = (gens: Generation[], current: Generation | null): ChatMsg[] => {
+    const chain = buildLineage(gens, current);
+    if (!chain.some((g) => g.kind === 'edit')) return [];
+    const msgs: ChatMsg[] = [];
+    const root = chain[0];
+    if (root && root.kind === 'concept') {
+      msgs.push({ role: 'assistant', text: 'Your original design.', imageUrl: root.output_image_url + '?t=' + root.id });
+    }
+    for (const g of chain.filter((g) => g.kind === 'edit')) {
       msgs.push({ role: 'user', text: g.prompt || 'Edit' });
-      msgs.push({ role: 'assistant', text: 'Updated design.', imageUrl: g.output_image_url + '?t=' + new Date(g.created_at).getTime() });
+      msgs.push({ role: 'assistant', text: 'Updated design.', imageUrl: g.output_image_url + '?t=' + g.id });
     }
     return msgs;
   };
@@ -72,10 +104,10 @@ export function DesignStudio() {
       setProject(res.project);
       const gens = res.project.generations || [];
       setGenerations(gens);
-      // Restore the edit conversation so a returning user can browse their changes.
-      setChatMessages(reconstructChat(gens));
       const ch = gens.find((g) => g.is_chosen) || pickIfSingle(pid, gens) || null;
       setChosen(ch);
+      // Restore the edit conversation so a returning user can browse their changes.
+      setChatMessages(reconstructChat(gens, ch));
 
       // If draft (no generations yet, no job in flight), kick the first generation.
       if (!initialKickRef.current && res.project.status === 'draft' && gens.length === 0) {
@@ -161,7 +193,7 @@ export function DesignStudio() {
   }, [projectId, project?.ai_job_id]);
 
   const handleChoose = async (gen: Generation) => {
-    if (!projectId) return;
+    if (!projectId || busy) return;
     setChosen(gen);
     setGenerations((prev) => prev.map((g) => ({ ...g, is_chosen: g.id === gen.id })));
     try {
@@ -286,6 +318,7 @@ export function DesignStudio() {
   const generating = project.status === 'generating' || (!!project.ai_job_id);
   const concepts = generations.filter((g) => g.kind === 'concept');
   const editHistory = generations.filter((g) => g.kind === 'edit');
+  const lineage = buildLineage(generations, chosen);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -326,7 +359,7 @@ export function DesignStudio() {
 
           <div className="flex-1 flex items-center justify-center p-6 min-h-[300px]">
             {chosen ? (
-              <img src={chosen.output_image_url + '?t=' + new Date(chosen.created_at).getTime()}
+              <img src={chosen.output_image_url + '?t=' + chosen.id}
                 alt="Selected design" className="max-w-full max-h-full object-contain rounded-2xl shadow-xl bg-white" />
             ) : generating ? (
               <div className="w-full max-w-sm space-y-5">
@@ -364,8 +397,8 @@ export function DesignStudio() {
               <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Concepts</p>
               <div className="flex gap-3 overflow-x-auto">
                 {concepts.map((g, i) => (
-                  <button key={g.id} onClick={() => handleChoose(g)}
-                    className={`flex-shrink-0 w-24 h-24 rounded-xl overflow-hidden ring-2 transition-all ${
+                  <button key={g.id} onClick={() => handleChoose(g)} disabled={busy}
+                    className={`flex-shrink-0 w-24 h-24 rounded-xl overflow-hidden ring-2 transition-all disabled:opacity-60 ${
                       chosen?.id === g.id ? 'ring-primary scale-105' : 'ring-transparent hover:ring-primary/40'
                     }`}>
                     <img src={g.output_image_url} alt={`Concept ${i + 1}`} className="w-full h-full object-cover" />
@@ -379,10 +412,10 @@ export function DesignStudio() {
             <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest">
               <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Versions · click to revert</p>
               <div className="flex gap-3 overflow-x-auto">
-                {generations.slice().sort((a, b) => a.id - b.id).map((g, i) => (
-                  <button key={g.id} onClick={() => handleChoose(g)}
+                {lineage.map((g, i) => (
+                  <button key={g.id} onClick={() => handleChoose(g)} disabled={busy}
                     title={g.kind === 'edit' ? (g.prompt ? 'Edit: ' + g.prompt : 'Edit') : 'Original concept'}
-                    className={`relative flex-shrink-0 w-20 h-20 rounded-lg overflow-hidden ring-2 transition-all ${
+                    className={`relative flex-shrink-0 w-20 h-20 rounded-lg overflow-hidden ring-2 transition-all disabled:opacity-60 ${
                       chosen?.id === g.id ? 'ring-primary' : 'ring-transparent hover:ring-primary/40'
                     }`}>
                     <img src={g.output_image_url} alt={g.kind === 'edit' ? 'Edit version' : 'Original'} className="w-full h-full object-cover" />

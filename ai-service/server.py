@@ -671,6 +671,7 @@ def _process_edit(job: Job) -> None:
 
     have_model = _load_pipeline()
     think_text = ""
+    edit_error = ""
     if have_model:
         try:
             pil, think_text = _run_edit(prompt, refs, width, height,
@@ -680,9 +681,10 @@ def _process_edit(job: Job) -> None:
             img = pil[0]
         except Exception as e:  # noqa: BLE001
             # Fall back to a placeholder for THIS job only; keep the model loaded so a
-            # single bad edit doesn't brick all future jobs (mirrors the generate path).
-            global _pipeline_error
-            _pipeline_error = f"Edit inference failed: {e}"
+            # single bad edit doesn't brick all future jobs. Use a LOCAL error — do NOT
+            # write the load-error global (_pipeline_error); it never clears and would
+            # poison /status, /api/health, and later jobs.
+            edit_error = f"Edit inference failed: {e}"
             print(f"[ai] {job.id} edit failed: {e}")
             have_model = False
             img = _placeholder_image(prompt, width, height, int(seed))
@@ -704,7 +706,7 @@ def _process_edit(job: Job) -> None:
         "steps": steps,
         "cfg_scale": cfg,
         "placeholder": not have_model,
-        "error": _pipeline_error if not have_model else "",
+        "error": (edit_error or _pipeline_error) if not have_model else "",
     }
 
 

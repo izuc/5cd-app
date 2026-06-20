@@ -210,9 +210,18 @@ class ProjectController
             $bindings[] = $data['status'];
         }
         if (isset($data['config']) || isset($data['config_json'])) {
-            $config = $data['config'] ?? $data['config_json'];
+            $incoming = $data['config'] ?? $data['config_json'];
+            if (is_string($incoming)) {
+                $incoming = json_decode($incoming, true) ?: [];
+            }
+            // Merge into the stored config so a partial update can't wipe server-managed
+            // keys (e.g. _last_prompt, referenceImageCount).
+            $cur = $db->prepare('SELECT config_json FROM projects WHERE id = ?');
+            $cur->execute([$projectId]);
+            $existing = json_decode($cur->fetch()['config_json'] ?? '{}', true) ?: [];
+            $merged = array_merge($existing, is_array($incoming) ? $incoming : []);
             $updates[] = 'config_json = ?';
-            $bindings[] = is_string($config) ? $config : json_encode($config);
+            $bindings[] = json_encode($merged);
         }
 
         if (empty($updates)) {
