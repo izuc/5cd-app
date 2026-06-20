@@ -87,7 +87,7 @@ export function CreateDesign() {
   const initialType = TYPE_OPTIONS.find((t) => t.value === searchParams.get('type'))?.value || 'logo';
   const [type, setType] = useState(initialType);
   const [description, setDescription] = useState('');
-  const [size, setSize] = useState('1024x1024');
+  const [size, setSize] = useState('2048x2048'); // default to the "best" trained resolution
   const [numConcepts, setNumConcepts] = useState(1);
   const [enhance, setEnhance] = useState(false);
   const [loading, setLoading] = useState(false);
