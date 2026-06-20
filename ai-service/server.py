@@ -497,12 +497,26 @@ _jobs: "OrderedDict[str, Job]" = OrderedDict()
 _queue: Optional[asyncio.Queue] = None
 
 
+MAX_JOBS = 200  # hard cap on retained job records (LRU eviction beyond this)
+
+
 def _cleanup_jobs() -> None:
     now = time.time()
+    # TTL eviction for finished jobs.
     expired = [j for j, job in _jobs.items()
                if job.completed_at and now - job.completed_at > JOB_TTL]
     for j in expired:
         _jobs.pop(j, None)
+    # Hard cap so abandoned/queued jobs can't leak memory unbounded — drop the
+    # oldest finished jobs first, falling back to the oldest record overall.
+    while len(_jobs) > MAX_JOBS:
+        victim = next((j for j, job in _jobs.items()
+                       if job.status in ("completed", "failed")), None)
+        if victim is None:
+            victim = next(iter(_jobs), None)
+        if victim is None:
+            break
+        _jobs.pop(victim, None)
 
 
 def _queue_position(job_id: str) -> int:
@@ -792,6 +806,16 @@ async def _worker() -> None:
             _cleanup_jobs()
 
 
+async def _periodic_cleanup() -> None:
+    # Evict expired/old jobs even when no new job arrives to trigger cleanup.
+    while True:
+        await asyncio.sleep(60)
+        try:
+            _cleanup_jobs()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -848,6 +872,7 @@ async def _startup() -> None:
     global _queue
     _queue = asyncio.Queue(maxsize=MAX_QUEUE)
     asyncio.create_task(_worker())
+    asyncio.create_task(_periodic_cleanup())
     # Try once at startup so the first request doesn't pay the load cost.
     _load_pipeline()
 

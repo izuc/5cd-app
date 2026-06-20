@@ -45,6 +45,7 @@ export function Dashboard() {
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -72,13 +73,14 @@ export function Dashboard() {
 
   useEffect(() => {
     setLoading(true);
+    setError('');
     api.listProjects({ page, limit: PAGE_SIZE, q: query })
       .then((res) => {
         setProjects(res.projects || []);
         setTotal(res.total || 0);
         setPages(res.pagination?.pages || 1);
       })
-      .catch(() => {})
+      .catch((err) => setError(err?.message || 'Could not load your designs.'))
       .finally(() => setLoading(false));
   }, [page, query, refreshKey]);
 
@@ -93,9 +95,12 @@ export function Dashboard() {
       } else {
         setRefreshKey((k) => k + 1);
       }
+      setDeleteId(null);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete project.');
+      setDeleteId(null);
     } finally {
       setDeleting(false);
-      setDeleteId(null);
     }
   };
 
@@ -158,6 +163,12 @@ export function Dashboard() {
             )}
           </div>
         </div>
+
+        {error && (
+          <div className="bg-error-container/10 text-error border border-error/20 px-4 py-3 rounded-xl text-sm flex items-center gap-2 mb-6">
+            <Icon name="error" /> {error}
+          </div>
+        )}
 
         {loading ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">

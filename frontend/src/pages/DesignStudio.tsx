@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { api, type Generation, type Project } from '../api/client';
 import { Icon } from '../components/Icon';
 import { usePageTitle } from '../hooks/usePageTitle';
@@ -13,7 +13,6 @@ interface ChatMsg {
 
 export function DesignStudio() {
   const { projectId } = useParams<{ projectId: string }>();
-  const navigate = useNavigate();
   usePageTitle('Studio');
 
   const [project, setProject] = useState<Project | null>(null);

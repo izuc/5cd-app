@@ -14,7 +14,11 @@ export function MobileNav() {
   return (
     <nav aria-label="Main navigation" className="lg:hidden fixed bottom-0 left-0 right-0 bg-surface/80 backdrop-blur-xl z-50 px-4 py-3 flex justify-between items-center border-t border-outline-variant/10 safe-area-bottom">
       {NAV_ITEMS.map((item) => {
-        const isActive = location.pathname === item.path && !item.isCreate;
+        const isActive = !item.isCreate && (
+          location.pathname === item.path ||
+          (item.path === '/dashboard' &&
+            (location.pathname.startsWith('/studio') || location.pathname.startsWith('/export')))
+        );
         if (item.isCreate) {
           return (
             <div key={item.label} className="relative -top-5">

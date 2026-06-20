@@ -21,7 +21,10 @@ export function Sidebar() {
 
       <nav className="flex-1 flex flex-col gap-1">
         {NAV_ITEMS.map((item) => {
-          const isActive = location.pathname === item.path;
+          const isActive =
+            location.pathname === item.path ||
+            (item.path === '/dashboard' &&
+              (location.pathname.startsWith('/studio') || location.pathname.startsWith('/export')));
           return (
             <Link key={item.label} to={item.path} aria-current={isActive ? 'page' : undefined}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
