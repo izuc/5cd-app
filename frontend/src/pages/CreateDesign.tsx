@@ -8,58 +8,62 @@ interface TypeOption {
   value: string;
   label: string;
   placeholder: string;
-  examples: string[];
+  examples: { label: string; prompt: string }[];
 }
 
+// Example prompts tuned to this model (SenseNova-U1 Infographic + 8-step LoRA) and
+// verified by rendering + visual scoring. Text designs quote a SHORT headline
+// (the model paints prompt words onto the image); every prompt names a subject,
+// palette, and style. Chips show a short label; the full prompt is applied on click.
 const TYPE_OPTIONS: TypeOption[] = [
   {
     value: 'logo',
     label: 'Logo',
-    placeholder: 'A modern coffee shop logo, steaming cup, earth tones, minimalist...',
+    placeholder: 'Flat vector fox head logo, geometric origami facets, centered on cream, burnt orange and charcoal two-tone, minimal and bold',
     examples: [
-      'A minimalist coffee cup logo, cream background, vector style',
-      'Geometric mountain peak, monoline, deep navy on warm white',
-      'Fox illustration, friendly and rounded, two-tone orange',
+      { label: 'Origami fox', prompt: 'Flat vector fox head logo, geometric origami facets, centered on cream, burnt orange and charcoal two-tone, minimal and bold' },
+      { label: 'Geometric owl', prompt: 'Geometric owl logo from circles and triangles, front-facing and symmetrical, centered on navy, mustard yellow and off-white, flat vector' },
+      { label: 'Coffee monogram', prompt: 'Flat vector coffee bean and leaf monogram, leaf curling into a bean, centered on beige, espresso brown and sage green, minimal geometric' },
     ],
   },
   {
     value: 'social',
     label: 'Social Post',
-    placeholder: 'Promo post for a sneaker drop, neon palette, urban vibe...',
+    placeholder: "Square sneaker drop post, one glowing high-top hero center, headline reads 'DROP', dark mode, electric magenta and cyan, halftone glow",
     examples: [
-      'Sneaker drop announcement, neon gradient, bold sans serif',
-      'Quote card, calm pastel background, serif typography',
-      'Product launch, dark mode, glowing accent on a single object',
+      { label: 'Sneaker drop', prompt: "Neon sneaker drop post, one glowing high-top hero center, headline reads 'DROP', dark background, magenta and cyan, halftone glow, hype energy" },
+      { label: 'Quote card', prompt: "Minimal quote card, leaf sprig top corner, large serif text reads 'STAY CALM', solid sage-green background, sand and ivory accents, serene mood" },
+      { label: 'Summer sale', prompt: "Summer sale post, bold sun and palm motif center, banner reads 'SALE', retro halftone, sunset orange coral and butter-yellow, playful nostalgic mood" },
     ],
   },
   {
     value: 'banner',
     label: 'Banner',
-    placeholder: 'Wide banner for a yoga studio, calm pastel, sunrise...',
+    placeholder: "Wide cafe hero banner reading 'FRESH', a steaming coffee cup on the right, warm cream and terracotta, hand-drawn line art, soft morning light",
     examples: [
-      'Yoga studio header, sunrise gradient, soft photography',
-      'Conference website banner, abstract waves, primary blue',
-      'Restaurant banner, warm earth tones, hand-drawn ingredients',
+      { label: "Cafe 'FRESH'", prompt: "Wide cafe hero banner reading 'FRESH', a steaming coffee cup on the right, warm cream and terracotta, hand-drawn line art, soft morning light" },
+      { label: "Hiker 'EXPLORE'", prompt: "Wide hero banner, lone hiker on a misty ridge, banner reads 'EXPLORE' top-left, teal-and-amber palette, flat vector, empty sky for the headline" },
+      { label: "Sneaker 'DROP'", prompt: "Wide minimal product hero, single sneaker on a pedestal, banner reads 'DROP', monochrome grey with one neon-green accent, cinematic dark backdrop" },
     ],
   },
   {
     value: 'flyer',
     label: 'Flyer',
-    placeholder: 'Concert flyer, bold typography, retro 70s feel...',
+    placeholder: "Vintage travel poster titled 'YOSEMITE', a lone granite peak above pine silhouettes, WPA halftone lithograph, forest green and cream, golden-hour glow",
     examples: [
-      'Concert flyer, bold typography, retro 70s palette',
-      'Farmers market flyer, vintage poster, warm cream',
-      'Workshop announcement, brutalist black and white grid',
+      { label: 'Travel poster', prompt: "Vintage travel poster titled 'YOSEMITE', lone granite peak above pine silhouettes, WPA halftone lithograph, forest green and cream, golden-hour glow" },
+      { label: 'Indie film', prompt: "Indie film poster reading 'LOST', a tiny rowboat adrift on vast geometric waves, minimalist risograph, navy and coral on off-white, lonely cinematic mood" },
+      { label: 'Festival poster', prompt: "Music festival poster reading 'SUMMER FEST', an electric guitar erupting into wildflowers, retro 70s screenprint, mustard orange and teal, sunset mood" },
     ],
   },
   {
     value: 'custom',
     label: 'Custom Prompt',
-    placeholder: 'Whatever you want — full control over the prompt...',
+    placeholder: 'Isometric scene of a tiny floating island with a glowing lighthouse, waterfalls spilling off the edges, teal and coral palette, flat vector, soft dusk lighting',
     examples: [
-      'A surreal portrait of a fox astronaut on a moonlit cliff',
-      'Editorial magazine cover, big serif title, single hero photo',
-      'Isometric scene of a tiny floating island with a lighthouse',
+      { label: 'Floating island', prompt: 'Isometric tiny floating island with a glowing lighthouse, waterfalls spilling off the edges, teal and coral palette, flat vector, soft dusk lighting' },
+      { label: 'Fox astronaut', prompt: 'Editorial illustration of a lone fox astronaut on a moonlit cliff, gazing at a ringed planet, muted indigo and warm amber, flat vector, cinematic rim lighting' },
+      { label: 'Botanical line-art', prompt: 'Line-art botanical of monstera and fern leaves in a terracotta pot, centered, sage green and burnt orange, minimal cream background, soft flat shading' },
     ],
   },
 ];
@@ -167,9 +171,9 @@ export function CreateDesign() {
           <div className="flex flex-wrap gap-2 pt-1">
             <span className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant px-1 py-1">Try:</span>
             {typeOption.examples.map((ex) => (
-              <button key={ex} type="button" onClick={() => setDescription(ex)}
-                className="text-xs text-left px-3 py-1.5 rounded-full bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors max-w-full truncate">
-                {ex}
+              <button key={ex.label} type="button" onClick={() => setDescription(ex.prompt)} title={ex.prompt}
+                className="text-xs text-left px-3 py-1.5 rounded-full bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors">
+                {ex.label}
               </button>
             ))}
           </div>
