@@ -396,8 +396,10 @@ class GenerationController
         ]);
         $body = curl_exec($ch);
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch);
         curl_close($ch);
         if ($code !== 200 || !$body) {
+            error_log("[5cd] AI POST {$url} failed: http={$code} curl_err=\"{$err}\"");
             return null;
         }
         $data = json_decode($body, true) ?: [];

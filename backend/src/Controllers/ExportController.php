@@ -94,7 +94,8 @@ class ExportController
             if ($outName !== '' && is_file($diskPath . $outName)) {
                 @unlink($diskPath . $outName); // drop any partially-written export file
             }
-            return $this->json($response, ['error' => true, 'message' => 'Export failed: ' . $e->getMessage()], 500);
+            $msg = ($_ENV['APP_ENV'] ?? 'production') === 'development' ? ('Export failed: ' . $e->getMessage()) : 'Export failed';
+            return $this->json($response, ['error' => true, 'message' => $msg], 500);
         }
 
         $destPath = $diskPath . $outName;
@@ -135,7 +136,8 @@ class ExportController
         } catch (\Throwable $e) {
             $db->rollBack();
             @unlink($destPath);
-            return $this->json($response, ['error' => true, 'message' => 'Export failed: ' . $e->getMessage()], 500);
+            $msg = ($_ENV['APP_ENV'] ?? 'production') === 'development' ? ('Export failed: ' . $e->getMessage()) : 'Export failed';
+            return $this->json($response, ['error' => true, 'message' => $msg], 500);
         }
 
         return $this->json($response, [

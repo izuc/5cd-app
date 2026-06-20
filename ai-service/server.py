@@ -78,8 +78,6 @@ PATCH_FACTOR = 32  # SenseNova-U1 wants W/H divisible by patch*merge size; safe 
 
 # Make sure the GGUF helper script and tokenizer files live next to this server
 # so `import layer_streaming` and HF AutoTokenizer resolve correctly.
-import sys
-
 if os.path.isdir(MODELS_DIR) and MODELS_DIR not in sys.path:
     sys.path.insert(0, MODELS_DIR)
 
@@ -801,8 +799,8 @@ class GenerateRequest(BaseModel):
 class EditRequest(BaseModel):
     prompt: str
     ref_images: list[str]              # base64-encoded PNGs
-    width: Optional[int] = None
-    height: Optional[int] = None
+    width: Optional[int] = Field(None, ge=256, le=4096)
+    height: Optional[int] = Field(None, ge=256, le=4096)
     steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
     cfg_scale: float = DEFAULT_CFG_SCALE
     img_cfg_scale: float = 1.0

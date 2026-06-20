@@ -71,8 +71,10 @@ exercised end-to-end.
 - The GGUF can't be loaded by plain llama.cpp — it uses diffusion sampling
   (`cfg_scale`, `num_steps`, `timestep_shift`, …) via `model.t2i_generate(...)` and
   `model.it2i_generate(...)` defined in the upstream package.
-- Defaults are **1024×1024**, **25 steps**, `cfg_scale=4.0`. Trained sweet spot is 2048×2048.
+- Defaults match the shipped 8-step distilled model: **2048×2048**, **8 steps**, `cfg_scale=1.0`,
+  `cfg_norm=none` (cfg 4.0 belongs to the base 50-step model and overdrives the 8-step into grain).
   Width/height must be a multiple of the patch grid (32 by default — the worker auto-rounds up).
+  Prompt enhancement is a fast deterministic style augmentation (logo/custom only), not an LLM rewrite.
 - On a 24 GB+ GPU the model just loads to CUDA. On lower-VRAM machines, an optional
   layer-streaming wrapper keeps most weights on CPU pinned memory and prefetches the next
   layer to the GPU during forward.

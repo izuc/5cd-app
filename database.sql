@@ -57,6 +57,10 @@ ALTER TABLE `projects`
   ADD CONSTRAINT `fk_projects_chosen_generation`
   FOREIGN KEY (`chosen_generation_id`) REFERENCES `generations`(`id`) ON DELETE SET NULL;
 
+-- Indexes for the hot dashboard list/poll and credit-history queries.
+ALTER TABLE `projects` ADD INDEX `idx_user_status_updated` (`user_id`, `status`, `updated_at`);
+ALTER TABLE `credit_transactions` ADD INDEX `idx_user_created` (`user_id`, `created_at`);
+
 CREATE TABLE `exports` (
   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
   `project_id` BIGINT NOT NULL,
