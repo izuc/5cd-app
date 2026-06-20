@@ -118,7 +118,7 @@ export function DesignStudio() {
           num_concepts: Number(cfg.numConcepts) || 1,
           width: Number(cfg.width) || 1024,
           height: Number(cfg.height) || 1024,
-          steps: Number(cfg.steps) || 8,
+          steps: Number(cfg.steps) || 25,
           enhance: !!cfg.enhance,
         }).catch((err) => setError(err.message || 'Failed to start generation'));
       }

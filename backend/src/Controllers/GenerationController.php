@@ -40,8 +40,8 @@ class GenerationController
             'num_concepts' => max(1, min(6, (int) ($config['numConcepts'] ?? ($data['num_concepts'] ?? 1)))),
             'width' => max(256, min(4096, (int) ($data['width'] ?? 1024))),
             'height' => max(256, min(4096, (int) ($data['height'] ?? 1024))),
-            'steps' => (int) ($data['steps'] ?? 8),
-            'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
+            'steps' => (int) ($data['steps'] ?? 25),
+            'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
             'enhance' => (bool) ($data['enhance'] ?? $config['enhance'] ?? false),
             'design_type' => $project['type'] ?: null,
@@ -127,8 +127,8 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'ref_images' => [base64_encode($bytes)],
-            'steps' => (int) ($data['steps'] ?? 8),
-            'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
+            'steps' => (int) ($data['steps'] ?? 25),
+            'cfg_scale' => (float) ($data['cfg_scale'] ?? 4.0),
             'img_cfg_scale' => (float) ($data['img_cfg_scale'] ?? 1.0),
         ];
 
