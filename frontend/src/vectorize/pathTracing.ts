@@ -904,53 +904,74 @@ export function generateSvg(
     // Large shapes drawn first, small details on top
     // Include foreground shapes + small background shapes (interior details like letter holes)
 
-    const allShapesFiltered: Array<{ hex: string; path: string; area: number }> = [];
     const smallShapeThreshold = width * height * 0.05; // 5% of image area
+    type FShape = { hex: string; path: string; area: number; bbox: number[]; holes: string[] };
+    const drawn: FShape[] = [];
+    const holeShapes: { path: string; bbox: number[] }[] = [];
+
+    // Rough bbox from a path's coordinates (a superset — control points included —
+    // which is fine for hole-in-letter containment).
+    const bboxOf = (d: string): number[] => {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      const nums = d.match(/-?\d+(?:\.\d+)?/g);
+      if (nums) for (let i = 0; i + 1 < nums.length; i += 2) {
+        const x = parseFloat(nums[i]), y = parseFloat(nums[i + 1]);
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+      return [x0, y0, x1, y1];
+    };
 
     for (const shape of shapes) {
       const hex = colorToHex(shape.color);
-
-      // Check if this shape should be included
-      const isSmallBackground = shape.isBackground && shape.area < smallShapeThreshold;
       const isDominantBg = hex === dominantHex;
 
-      // Include if: foreground, OR small background (not dominant color)
+      // An enclosed region in the background colour is a HOLE/counter (letter
+      // interiors, donut holes). Punch it out (fill-rule evenodd) so it's truly
+      // transparent instead of filled with the background colour.
+      if (isDominantBg && !shape.isBackground) {
+        holeShapes.push({ path: shape.path, bbox: bboxOf(shape.path) });
+        continue;
+      }
+
+      const isSmallBackground = shape.isBackground && shape.area < smallShapeThreshold;
       if (!shape.isBackground || (isSmallBackground && !isDominantBg)) {
-        allShapesFiltered.push({
-          hex,
-          path: shape.path,
-          area: shape.area
-        });
+        drawn.push({ hex, path: shape.path, area: shape.area, bbox: bboxOf(shape.path), holes: [] });
       }
     }
 
     // Fallback: if nothing included, include everything except dominant background
-    if (allShapesFiltered.length === 0) {
+    if (drawn.length === 0) {
       for (const shape of shapes) {
         const hex = colorToHex(shape.color);
-        if (hex !== dominantHex) {
-          allShapesFiltered.push({
-            hex,
-            path: shape.path,
-            area: shape.area
-          });
-        }
+        if (hex !== dominantHex) drawn.push({ hex, path: shape.path, area: shape.area, bbox: bboxOf(shape.path), holes: [] });
       }
     }
 
-    // Sort by area descending (largest first, smallest/details on top)
-    allShapesFiltered.sort((a, b) => b.area - a.area);
+    // Assign each hole to the SMALLEST drawn shape whose bbox contains it, and punch
+    // it out of that shape via fill-rule=evenodd. Self-contained per shape, so it
+    // works in the downloaded SVG AND the editor (which re-renders shapes) — no mask.
+    const contains = (o: number[], i: number[]) => o[0] <= i[0] && o[1] <= i[1] && o[2] >= i[2] && o[3] >= i[3];
+    for (const h of holeShapes) {
+      let best: FShape | null = null;
+      for (const s of drawn) if (contains(s.bbox, h.bbox) && (!best || s.area < best.area)) best = s;
+      if (best) best.holes.push(h.path); // unassigned holes are simply left transparent
+    }
 
-    // Single shapes layer with proper layering. Each shape strokes its own
-    // boundary in its own colour so it bridges the hairline anti-aliasing seam
-    // browsers leave between abutting fills (the "white gaps"). The stroke is in
-    // viewBox units, so it shrinks in device px when the SVG is shown small (e.g.
-    // the editor preview) — hence ~2.5 to stay >=1 device px there.
+    // Sort by area descending (largest first, smallest/details on top)
+    drawn.sort((a, b) => b.area - a.area);
+
+    // Same-colour stroke bridges the anti-aliasing seam (the "white gaps"); see note
+    // in standard mode below. ~2.5 viewBox units to survive the small editor preview.
     const strokeWidth = Math.max(2.5, 3 / pathScale);
     svg += `    <g id="shapes-layer">\n`;
-    for (const { hex, path } of allShapesFiltered) {
-      const scaledPath = scalePathString(path, pathScale);
-      svg += `      <path fill="${hex}" stroke="${hex}" stroke-width="${strokeWidth}" stroke-linejoin="round" d="${scaledPath}"/>\n`;
+    for (const s of drawn) {
+      let d = scalePathString(s.path, pathScale);
+      let fillRule = '';
+      if (s.holes.length) {
+        d += ' ' + s.holes.map((hp) => scalePathString(hp, pathScale)).join(' ');
+        fillRule = ' fill-rule="evenodd"';
+      }
+      svg += `      <path fill="${s.hex}"${fillRule} stroke="${s.hex}" stroke-width="${strokeWidth}" stroke-linejoin="round" d="${d}"/>\n`;
     }
     svg += `    </g>\n`;
 
