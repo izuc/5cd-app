@@ -472,6 +472,11 @@ def _process_generate(job: Job) -> None:
     base_seed = p.get("seed")
     if base_seed is None:
         base_seed = random.randint(0, 2**31 - 1)
+    # "Unique concepts": rewrite the prompt per concept via the Qwen3 text encoder
+    # (sampling makes each rewrite distinct) so the concepts genuinely differ, not
+    # just by seed. Only meaningful for >1 concept.
+    vary = bool(p.get("vary_concepts")) and num > 1
+    design_type = p.get("design_type")
 
     have_model = _load_pipeline()
     images_b64: list[str] = []
@@ -482,18 +487,24 @@ def _process_generate(job: Job) -> None:
     try:
         for i in range(num):
             seed = int(base_seed) + i
+            cprompt = raw_prompt
+            if vary and have_model:
+                try:
+                    cprompt = _expand_prompt(raw_prompt, design_type)
+                except Exception:  # noqa: BLE001
+                    cprompt = raw_prompt
             is_ph = True
             if have_model:
                 try:
-                    img = _run(raw_prompt, width, height, steps, guidance, seed)
+                    img = _run(cprompt, width, height, steps, guidance, seed)
                     real_count += 1
                     is_ph = False
                 except Exception as e:  # noqa: BLE001
                     last_error = f"Inference failed: {e}"
-                    print(f"[alt] {job.id} concept {i} failed: {e}")
-                    img = _placeholder_image(raw_prompt, width, height, seed)
+                    print(f"[flux] {job.id} concept {i} failed: {e}")
+                    img = _placeholder_image(cprompt, width, height, seed)
             else:
-                img = _placeholder_image(raw_prompt, width, height, seed)
+                img = _placeholder_image(cprompt, width, height, seed)
             images_b64.append(_pil_to_b64(img))
             placeholder_flags.append(is_ph)
             job.progress = int(((i + 1) / num) * 100)
@@ -609,6 +620,7 @@ class GenerateRequest(BaseModel):
     cfg_scale: Optional[float] = None  # legacy field, ignored (FLUX uses guidance_scale)
     seed: Optional[int] = None
     enhance: bool = False
+    vary_concepts: bool = False  # rewrite the prompt per concept for unique results
     design_type: Optional[str] = None
     ref_images: Optional[list[str]] = None
     img_cfg_scale: Optional[float] = None

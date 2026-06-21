@@ -44,6 +44,8 @@ class GenerationController
             'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
             'seed' => isset($data['seed']) ? (int) $data['seed'] : null,
             'enhance' => (bool) ($data['enhance'] ?? $config['enhance'] ?? false),
+            // Unique concepts: the worker rewrites the prompt per concept (Qwen3) for variety.
+            'vary_concepts' => (bool) ($config['varyConcepts'] ?? $data['vary_concepts'] ?? false),
             'design_type' => $project['type'] ?: null,
         ];
 

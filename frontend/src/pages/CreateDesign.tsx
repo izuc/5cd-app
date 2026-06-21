@@ -96,6 +96,7 @@ export function CreateDesign() {
   const [steps, setSteps] = useState(STEPS);     // active engine's step count
   const [engineLabel, setEngineLabel] = useState('');
   const [numConcepts, setNumConcepts] = useState(1);
+  const [varyConcepts, setVaryConcepts] = useState(false);
   const [expanding, setExpanding] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -184,6 +185,7 @@ export function CreateDesign() {
           description,
           size,
           numConcepts,
+          varyConcepts: numConcepts > 1 && varyConcepts,
           steps,
           width: sizePreset.w,
           height: sizePreset.h,
@@ -327,6 +329,21 @@ export function CreateDesign() {
             </div>
           </div>
         </div>
+
+        {numConcepts > 1 && (
+          <label className="flex items-start gap-3 px-1 cursor-pointer">
+            <input type="checkbox" checked={varyConcepts} onChange={(e) => setVaryConcepts(e.target.checked)}
+              disabled={loading} className="mt-0.5 h-4 w-4 accent-primary cursor-pointer" />
+            <div className="flex-1 min-w-0">
+              <span className="font-headline font-bold text-sm text-on-surface flex items-center gap-1.5">
+                Unique concepts <Icon name="shuffle" className="text-sm text-primary" />
+              </span>
+              <p className="text-xs text-on-surface-variant mt-0.5">
+                Rewrite the prompt for each concept (AI) so they vary in style &amp; composition, not just seed. A little slower.
+              </p>
+            </div>
+          </label>
+        )}
 
         <div className="space-y-2">
           <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Reference image (optional)</label>
