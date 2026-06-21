@@ -1066,10 +1066,13 @@ export function mergeSimilarColors(
     }
   }
 
-  // Update quantized data with new indices
+  // Update quantized data with new indices. Preserve the transparent marker (255):
+  // oldToNew has no entry for it, so without this transparent pixels would map to
+  // colour 0 and get filled instead of staying transparent.
   const newQuantized = new Uint8Array(quantized.length);
   for (let i = 0; i < quantized.length; i++) {
-    newQuantized[i] = oldToNew[quantized[i]];
+    const v = quantized[i];
+    newQuantized[i] = v === 255 ? 255 : oldToNew[v];
   }
 
   return {

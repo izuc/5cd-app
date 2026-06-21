@@ -29,14 +29,14 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
   const [colorCount, setColorCount] = useState(16); // detail-rich logos lose low-contrast features (text/icons) below ~16; flat logos collapse extras so it's safe
   const [smoothness, setSmoothness] = useState(5); // higher = smoother curves (below ~3 has little effect)
   const [removeBackground, setRemoveBackground] = useState(false);
-  const [aiUpscale, setAiUpscale] = useState(false);
+  const [aiUpscale, setAiUpscale] = useState(true); // enlarge with AI before tracing by default (cleaner trace)
   const [canUpscale, setCanUpscale] = useState(false);
   const [loadingImg, setLoadingImg] = useState(false);
   const [loadMsg, setLoadMsg] = useState('Loading image…');
   const [err, setErr] = useState('');
   const [working, setWorking] = useState('');   // current (edited) SVG
   const [history, setHistory] = useState<string[]>([]);
-  const cacheRef = useRef<{ upscaled: boolean; data: ImageData } | null>(null);
+  const cacheRef = useRef<{ key: string; data: ImageData; upscaled: boolean } | null>(null);
 
   // Draw the source image onto a canvas, optionally capped to maxDim (long side).
   const drawSource = useCallback((maxDim: number) => new Promise<HTMLCanvasElement>((resolve, reject) => {
@@ -75,31 +75,40 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
     try {
       setLoadingImg(true);
       let data: ImageData;
-      if (cacheRef.current && cacheRef.current.upscaled === aiUpscale) {
+      let didUpscale = false;
+      const cacheKey = `${imageUrl}|${aiUpscale}`;
+      if (cacheRef.current && cacheRef.current.key === cacheKey) {
         data = cacheRef.current.data;
+        didUpscale = cacheRef.current.upscaled;
       } else if (aiUpscale) {
-        setLoadMsg('AI upscaling…');
-        const srcUrl = (await drawSource(MAX_SOURCE)).toDataURL('image/png');
-        const up = await api.upscale(srcUrl, 2048); // 4x model, capped to 2048
-        data = await dataUrlToImageData(up.image);
-        cacheRef.current = { upscaled: true, data };
+        setLoadMsg('AI enlarging…');
+        try {
+          const srcUrl = (await drawSource(MAX_SOURCE)).toDataURL('image/png');
+          const up = await api.upscale(srcUrl, 2048); // 4x model, capped to 2048
+          data = await dataUrlToImageData(up.image);
+          didUpscale = true;
+        } catch {
+          // Upscaler unavailable — fall back to the original so vectorise still works.
+          data = canvasToImageData(await drawSource(MAX_SOURCE));
+        }
+        cacheRef.current = { key: cacheKey, data, upscaled: didUpscale };
       } else {
         setLoadMsg('Loading image…');
         data = canvasToImageData(await drawSource(MAX_SOURCE));
-        cacheRef.current = { upscaled: false, data };
+        cacheRef.current = { key: cacheKey, data, upscaled: false };
       }
       setLoadingImg(false);
       const settings: ConversionSettings = {
         colorCount, smoothness, minArea: 20, removeBackground,
         hasTransparentSource: hasTransparency(data),
         selectedColors: new Set<number>(),
-        // The AI-upscaled source is already high-res, so cap the engine's label
+        // An AI-enlarged source is already high-res, so cap the engine's label
         // upscale at 2x — full quality on a 2048 source would trace at ~6k (slow).
-        qualityLevel: aiUpscale && (quality === 'high' || quality === 'detailed') ? 'balanced' : quality,
+        qualityLevel: didUpscale && (quality === 'high' || quality === 'detailed') ? 'balanced' : quality,
       };
       processImage(data, settings);
     } catch (e: any) { setLoadingImg(false); setErr(e?.message || 'Vectorise failed.'); }
-  }, [aiUpscale, colorCount, smoothness, removeBackground, quality, drawSource, processImage]);
+  }, [aiUpscale, colorCount, smoothness, removeBackground, quality, drawSource, processImage, imageUrl]);
 
   // Auto-run once on open.
   useEffect(() => { convert(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);

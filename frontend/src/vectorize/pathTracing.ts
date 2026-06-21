@@ -943,9 +943,10 @@ export function generateSvg(
 
     // Single shapes layer with proper layering. Each shape strokes its own
     // boundary in its own colour so it bridges the hairline anti-aliasing seam
-    // browsers leave between abutting fills (the "white gaps"). ~1.5 viewBox units
-    // is enough to cover the seam at any display size and scales when zoomed.
-    const strokeWidth = Math.max(1.5, 2 / pathScale);
+    // browsers leave between abutting fills (the "white gaps"). The stroke is in
+    // viewBox units, so it shrinks in device px when the SVG is shown small (e.g.
+    // the editor preview) — hence ~2.5 to stay >=1 device px there.
+    const strokeWidth = Math.max(2.5, 3 / pathScale);
     svg += `    <g id="shapes-layer">\n`;
     for (const { hex, path } of allShapesFiltered) {
       const scaledPath = scalePathString(path, pathScale);
@@ -973,8 +974,9 @@ export function generateSvg(
     allShapesFlat.sort((a, b) => b.area - a.area);
 
     // Same-colour stroke to bridge the browser's anti-aliasing seam between
-    // abutting fills (the "white gaps"). Was 0.5 — too thin at high quality.
-    const strokeWidthStd = Math.max(1.5, 2 / pathScale);
+    // abutting fills (the "white gaps"). In viewBox units, so it must be large
+    // enough to stay >=1 device px even when the SVG is displayed small.
+    const strokeWidthStd = Math.max(2.5, 3 / pathScale);
     svg += `    <g id="shapes-layer">\n`;
     for (const { hex, path } of allShapesFlat) {
       const scaledPath = scalePathString(path, pathScale);
