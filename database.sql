@@ -1,5 +1,5 @@
 -- 5cd_single database schema
--- Single-image variant of 5cd.com (uses SenseNova-U1 for generation + editing).
+-- Single-image variant of 5cd.com (uses FLUX.2-klein-4B for generation + editing).
 -- No layered/decomposition tables — generations are flat single images.
 
 DROP DATABASE IF EXISTS `5cd_single`;
@@ -38,7 +38,7 @@ CREATE TABLE `generations` (
   `project_id` BIGINT NOT NULL,
   `parent_generation_id` BIGINT NULL,
   `prompt` TEXT NULL,
-  `model` VARCHAR(100) NOT NULL DEFAULT 'sensenova-u1',
+  `model` VARCHAR(100) NOT NULL DEFAULT 'flux',
   `kind` ENUM('concept','edit','upload') NOT NULL DEFAULT 'concept',
   `output_image_url` VARCHAR(500) NULL,
   `width` INT NULL,

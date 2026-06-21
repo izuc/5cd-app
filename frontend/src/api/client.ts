@@ -79,7 +79,10 @@ export const api = {
   // Active t2i engine + its UI policy (size cap, default size, steps) so the
   // Create page can adapt the size selector to whichever model will run.
   aiConfig: () =>
-    request<{ engine: string; label: string; enabled: boolean; max_side: number; default_size: string; steps: number; supports_edit: boolean }>('/ai-config'),
+    request<{ engine: string; label: string; enabled: boolean; max_side: number; default_size: string; steps: number; supports_edit: boolean; supports_upscale?: boolean }>('/ai-config'),
+  // AI super-resolution (Real-ESRGAN) — used by the vectoriser for a cleaner trace.
+  upscale: (image: string, max_dim?: number) =>
+    request<{ image: string; width: number; height: number }>('/upscale', { method: 'POST', body: JSON.stringify({ image, max_dim }) }),
   generate: (projectId: number, opts: { prompt?: string; num_concepts?: number; width?: number; height?: number; steps?: number; enhance?: boolean } = {}) =>
     request<{ job_id: string; status: string }>(`/projects/${projectId}/generate`, { method: 'POST', body: JSON.stringify(opts) }),
   edit: (projectId: number, prompt: string, imageUrl?: string, opts: { steps?: number; cfg_scale?: number } = {}) =>

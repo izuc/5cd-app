@@ -48,6 +48,10 @@ return function (App $app) {
         $api->get('/ai-config', [GenerationController::class, 'aiConfig'])
             ->add(new AuthMiddleware());
 
+        // -- AI upscale (proxied to the worker; used by the vectoriser) -----
+        $api->post('/upscale', [GenerationController::class, 'upscale'])
+            ->add(new AuthMiddleware());
+
         // -- Exports / credits / user --------------------------------------
         $api->get('/exports', [ExportController::class, 'listForUser'])->add(new AuthMiddleware());
 

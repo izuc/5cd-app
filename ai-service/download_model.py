@@ -1,169 +1,79 @@
 """
-Download everything needed to run the SenseNova-U1 GGUF locally.
+Download everything the FLUX.2-klein-4B worker needs into MODELS_DIR:
 
-This grabs four sets of files into MODELS_DIR:
-  1. The GGUF weights themselves   (smthem/SenseNova-U1-8B-MoT-Merger-gguf)
-  2. The 8-step Infographic LoRA   (sensenova/SenseNova-U1-8B-MoT-LoRAs), saved
-                                     locally as LORA_FILE (Infographic-LoRA-8step.safetensors)
-  3. The tokenizer + model config  (sensenova/SenseNova-U1-8B-MoT)
-  4. layer_streaming.py            (helper from the GGUF repo for VRAM-efficient inference)
+  1. GGUF transformer        unsloth/FLUX.2-klein-4B-GGUF :: <GGUF_FILE>
+  2. Base diffusers repo     black-forest-labs/FLUX.2-klein-4B — only the bits we
+                             use: text encoder (Qwen3) + VAE + tokenizer + scheduler
+                             + configs. The bf16 transformer .safetensors (~8GB) is
+                             skipped because we load the GGUF transformer instead.
+  3. AI upscaler             Kim2091/UltraSharp :: 4x-UltraSharp.safetensors
 
-Usage:
-    python download_model.py                # pull GGUF + LoRA + config + tokenizer
-    python download_model.py --gguf-only    # just the GGUF
-    python download_model.py --lora-only    # just the LoRA
-    python download_model.py --config-only  # just the config + tokenizer
-    python download_model.py --list         # list available files in all repos
+FLUX.2-klein is Apache-2.0 and ungated; no HF token required (set HF_TOKEN only if
+you hit anonymous rate limits).
+
+Usage:  python download_model.py
 """
 
-import argparse
 import os
-import shutil
 import sys
 
 from dotenv import load_dotenv
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, snapshot_download
 
 load_dotenv()
 
-MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(os.path.dirname(__file__), "models"))
-TOKENIZER_REPO = os.getenv("TOKENIZER_REPO", "sensenova/SenseNova-U1-8B-MoT")
-GGUF_REPO = os.getenv("GGUF_REPO", "smthem/SenseNova-U1-8B-MoT-Merger-gguf")
-GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
-
-# Optional LoRA folded into the GGUF at load time. LORA_REPO/LORA_HF_FILE name the
-# upstream file; LORA_FILE is what it's saved as locally (and what the worker reads).
-LORA_REPO = os.getenv("LORA_REPO", "sensenova/SenseNova-U1-8B-MoT-LoRAs")
-LORA_HF_FILE = os.getenv("LORA_HF_FILE", "SenseNova-U1-8B-MoT-Infographic-LoRA-8step-V1.0.safetensors")
-LORA_FILE = os.getenv("LORA_FILE", "Infographic-LoRA-8step.safetensors")
-
-# Files to pull from the SenseNova "official" repo so AutoConfig / AutoTokenizer
-# and the custom sensenova_u1 module find what they need.
-TOKENIZER_FILES = [
-    "config.json",
-    "configuration.py",                  # custom config class registration
-    "modeling.py",                        # custom model class registration (if present)
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "vocab.json",
-    "merges.txt",
-    "preprocessor_config.json",
-    "processor_config.json",
-    "generation_config.json",
-    "chat_template.jinja",
-]
-
-# Helpers shipped in the GGUF repo
-HELPER_FILES = [
-    "layer_streaming.py",
-]
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(HERE, "models"))
+BASE_REPO = os.getenv("BASE_REPO", "black-forest-labs/FLUX.2-klein-4B")
+GGUF_REPO = os.getenv("GGUF_REPO", "unsloth/FLUX.2-klein-4B-GGUF")
+GGUF_FILE = os.getenv("GGUF_FILE", "flux2-gguf/flux-2-klein-4b-Q4_K_M.gguf")
+UPSCALER_REPO = os.getenv("UPSCALER_REPO", "Kim2091/UltraSharp")
+UPSCALER_FILE = os.getenv("UPSCALER_FILE", "upscaler/4x-UltraSharp.safetensors")
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or None
 
 
-def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-
-def _download(
-    repo: str,
-    filename: str,
-    dest_dir: str,
-    *,
-    optional: bool = False,
-    dest_name: str | None = None,
-) -> str | None:
-    local_path = os.path.join(dest_dir, dest_name or os.path.basename(filename))
-    if os.path.exists(local_path):
-        size_mb = os.path.getsize(local_path) / (1024 * 1024)
-        print(f"  [skip] {os.path.basename(filename)} already present ({size_mb:.1f} MB)")
-        return local_path
-
-    print(f"  [pull] {repo}::{filename}")
+def _file(repo: str, rel: str) -> bool:
+    name = os.path.basename(rel)
+    dest = os.path.join(MODELS_DIR, os.path.dirname(rel) or ".")
+    print(f"\n[file] {repo} :: {name}  ->  {dest}")
     try:
-        downloaded = hf_hub_download(repo_id=repo, filename=filename, local_dir=dest_dir)
-        # If the hub stored it at a nested path, flatten it.
-        if downloaded != local_path and os.path.exists(downloaded):
-            _ensure_dir(os.path.dirname(local_path))
-            shutil.move(downloaded, local_path)
-        size_mb = os.path.getsize(local_path) / (1024 * 1024)
-        print(f"         done ({size_mb:.1f} MB)")
-        return local_path
-    except Exception as e:  # noqa: BLE001 — we want to keep going for optional files
-        if optional:
-            print(f"         skipped (optional, not in repo): {e}")
-            return None
-        print(f"         FAILED: {e}")
-        return None
-
-
-def fetch_gguf() -> bool:
-    print(f"\n[gguf] {GGUF_REPO} :: {GGUF_FILE}")
-    return _download(GGUF_REPO, GGUF_FILE, MODELS_DIR) is not None
-
-
-def fetch_lora() -> bool:
-    if not LORA_FILE:
-        print("\n[lora] LORA_FILE is empty — skipping LoRA download.")
+        hf_hub_download(repo_id=repo, filename=name, local_dir=dest, token=HF_TOKEN)
+        print("       done")
         return True
-    print(f"\n[lora] {LORA_REPO} :: {LORA_HF_FILE}  ->  {LORA_FILE}")
-    return _download(LORA_REPO, LORA_HF_FILE, MODELS_DIR, dest_name=LORA_FILE) is not None
-
-
-def fetch_helpers() -> None:
-    print(f"\n[helpers] from {GGUF_REPO}")
-    for filename in HELPER_FILES:
-        _download(GGUF_REPO, filename, MODELS_DIR, optional=False)
-
-
-def fetch_tokenizer_and_config() -> bool:
-    print(f"\n[tokenizer/config] from {TOKENIZER_REPO}")
-    pulled_any = False
-    for filename in TOKENIZER_FILES:
-        path = _download(TOKENIZER_REPO, filename, MODELS_DIR, optional=True)
-        if path:
-            pulled_any = True
-    if not pulled_any:
-        print(f"  WARNING: no tokenizer/config files found in {TOKENIZER_REPO}.")
-    return pulled_any
-
-
-def list_repos() -> None:
-    for repo in (GGUF_REPO, LORA_REPO, TOKENIZER_REPO):
-        print(f"\n=== {repo} ===")
-        try:
-            for f in list_repo_files(repo):
-                print(f"  {f}")
-        except Exception as e:  # noqa: BLE001
-            print(f"  ERROR: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"       FAILED: {e}")
+        return False
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Download SenseNova-U1 GGUF + config locally.")
-    ap.add_argument("--gguf-only", action="store_true", help="Only the GGUF weights.")
-    ap.add_argument("--lora-only", action="store_true", help="Only the LoRA.")
-    ap.add_argument("--config-only", action="store_true", help="Only tokenizer + config files.")
-    ap.add_argument("--list", action="store_true", help="List files in all repos and exit.")
-    args = ap.parse_args()
-
-    if args.list:
-        list_repos()
-        return 0
-
-    _ensure_dir(MODELS_DIR)
+    os.makedirs(MODELS_DIR, exist_ok=True)
     print(f"Destination: {os.path.abspath(MODELS_DIR)}")
-
     ok = True
-    if args.config_only:
-        ok = fetch_tokenizer_and_config() and ok
-    elif args.gguf_only:
-        ok = fetch_gguf() and ok
-    elif args.lora_only:
-        ok = fetch_lora() and ok
-    else:
-        ok = fetch_gguf() and ok
-        ok = fetch_lora() and ok
-        fetch_helpers()
-        ok = fetch_tokenizer_and_config() and ok
+
+    print("\n[1/3] GGUF transformer")
+    ok = _file(GGUF_REPO, GGUF_FILE) and ok
+
+    print("\n[2/3] Base diffusers components (skipping the unused bf16 transformer)")
+    try:
+        # local_dir (not cache_dir): plain copies — no Windows symlink error, no 2x blobs.
+        path = snapshot_download(
+            repo_id=BASE_REPO, local_dir=os.path.join(MODELS_DIR, "flux2-klein-base"), token=HF_TOKEN,
+            allow_patterns=[
+                "model_index.json",
+                "text_encoder/*",
+                "vae/*",
+                "tokenizer/*",
+                "scheduler/*",
+                "transformer/config.json",  # needed by from_single_file (config only)
+            ],
+        )
+        print(f"       done -> {path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"       FAILED: {e}")
+        ok = False
+
+    print("\n[3/3] AI upscaler")
+    ok = _file(UPSCALER_REPO, UPSCALER_FILE) and ok
 
     print("\nDone." if ok else "\nFinished with errors.")
     return 0 if ok else 1

@@ -11,8 +11,8 @@ interface TypeOption {
   examples: { label: string; prompt: string }[];
 }
 
-// Example prompts tuned to this model (SenseNova-U1 Infographic + 8-step LoRA) and
-// verified by rendering + visual scoring. Text designs quote a SHORT headline
+// Example prompts tuned for FLUX.2-klein and verified by rendering + visual
+// scoring. Text designs quote a SHORT headline
 // (the model paints prompt words onto the image); every prompt names a subject,
 // palette, and style. Chips show a short label; the full prompt is applied on click.
 const TYPE_OPTIONS: TypeOption[] = [
@@ -68,8 +68,7 @@ const TYPE_OPTIONS: TypeOption[] = [
   },
 ];
 
-// Resolution buckets. SenseNova/Ideogram are tuned for the larger (2048) sizes;
-// FLUX.2-klein for ~1MP (1024). The Create page filters this list to the active
+// Resolution buckets. FLUX.2-klein is tuned for ~1MP (1024). The Create page filters this list to the active
 // engine's cap (from /api/ai-config) so you can't pick a size the model dislikes.
 const SIZE_OPTIONS = [
   { value: '2048x2048', label: 'Square 1:1 · 2048 (best)', w: 2048, h: 2048 },
@@ -104,8 +103,8 @@ export function CreateDesign() {
   const [upload, setUpload] = useState<{ name: string; dataUrl: string } | null>(null);
   const [reference, setReference] = useState<{ name: string; dataUrl: string } | null>(null);
 
-  // Adapt the size selector + steps to whichever t2i engine is active (SenseNova /
-  // FLUX / Ideogram). Falls back silently to the SenseNova defaults if unavailable.
+  // Adapt the size selector + steps to the active engine (FLUX.2-klein).
+  // Falls back silently to the built-in defaults if /ai-config is unavailable.
   useEffect(() => {
     api.aiConfig().then((cfg) => {
       setMaxSide(cfg.max_side);
@@ -114,7 +113,7 @@ export function CreateDesign() {
       const fits = SIZE_OPTIONS.filter((s) => Math.max(s.w, s.h) <= cfg.max_side);
       const pref = fits.find((s) => s.value === cfg.default_size) || fits[0];
       if (pref) setSize(pref.value);
-    }).catch(() => { /* keep SenseNova defaults */ });
+    }).catch(() => { /* keep built-in defaults */ });
   }, []);
 
   // Read an image, downscale to the model's 2048 sweet spot client-side (keeps the

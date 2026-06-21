@@ -1,22 +1,14 @@
 """
-FastAPI worker for 5cd-single.
+5cd image worker — FLUX.2-klein-4B (Apache-2.0, ungated).
 
-One model, one job: SenseNova-U1-8B-MoT (GGUF) for both text-to-image and
-image editing. No layered decomposition.
+One model does everything: text-to-image, image-to-image (edits, via image=
+conditioning) and AI upscaling. Job API: POST /api/generate/async + /api/edit/async
+-> {job_id}; GET /api/jobs/{id} -> status + result.images[]; POST /api/upscale ->
+super-resolved image. Quantised to fit a single <24GB card: GGUF transformer
+(from_single_file) + Qwen3 text encoder in 4-bit nf4.
 
-Endpoints
----------
-  POST /api/generate         — synchronous T2I; returns one or more concept images.
-  POST /api/generate/async   — returns a job_id immediately, poll /api/jobs/{id}.
-  POST /api/edit             — synchronous image edit (concept image + instruction).
-  POST /api/edit/async       — async variant.
-  GET  /api/jobs/{id}        — poll a job.
-  POST /api/health           — quick liveness + queue depth.
-  GET  /status               — what model is loaded, what's in the queue.
-
-If the GGUF or its dependencies aren't available we drop into placeholder
-mode — the API still responds, but with a generated swatch image so the
-frontend can be developed without a GPU box.
+If the weights / deps aren't present the worker still runs and returns placeholder
+swatches so the wiring can be exercised without a model.
 """
 
 from __future__ import annotations
@@ -25,7 +17,6 @@ import asyncio
 import base64
 import gc
 import io
-import json
 import os
 import random
 import sys
@@ -35,68 +26,84 @@ import warnings
 from collections import OrderedDict
 from typing import Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 warnings.filterwarnings("ignore")
 
-# Windows console: transformers' auto_docstring prints emojis (e.g. ðŸš¨) which
-# crash on cp1252. Switch the std streams to utf-8 before any heavy imports.
 try:
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 except Exception:
     pass
 
-# Reduce CUDA fragmentation so freed activations can be reused. The LoRA-merged
-# Infographic model is large (~28GB resident); without this, edits OOM'd on a
-# 32GB card. Must be set before torch initialises CUDA.
+# Pin which physical GPU this worker uses BEFORE torch initialises CUDA.
+# Empty = all visible (cuda:0).
+_gpu_index = os.getenv("GPU_INDEX", "").strip()
+if _gpu_index != "" and "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _gpu_index
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Config
+# Config — FLUX.2-klein-4B, quantised to fit a single <24GB card.
+# Transformer: GGUF via from_single_file. Text encoder: Qwen3 in 4-bit (nf4).
+# Validated peak ~13.5GB at 1024px (t2i + i2i).
 # ---------------------------------------------------------------------------
+ENGINE = "flux"           # sole engine (kept for /status + job-result labelling)
+SUPPORTS_EDIT = True      # FLUX.2-klein does image-to-image via image=
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.getenv("MODELS_DIR", os.path.join(HERE, "models"))
-GGUF_FILE = os.getenv("GGUF_FILE", "SenseNova-U1-8B-MoT-8step-Q4_K_S.gguf")
-# Optional kohya-style LoRA (safetensors) folded into the GGUF weights at load
-# time — e.g. the 8-step Infographic distill LoRA. Empty = no LoRA.
-LORA_FILE = os.getenv("LORA_FILE", "")
+# Base diffusers repo — supplies VAE, scheduler, tokenizer, text-encoder weights + configs.
+BASE_REPO = os.getenv("BASE_REPO", "black-forest-labs/FLUX.2-klein-4B")
+# Prefer a plain local copy of the base components (download_model.py writes them to
+# this dir via local_dir — avoids the Windows HF-cache symlink error and 2x storage).
+_LOCAL_BASE = os.path.join(MODELS_DIR, "flux2-klein-base")
+BASE = _LOCAL_BASE if os.path.isdir(_LOCAL_BASE) else BASE_REPO
+# GGUF transformer (relative to MODELS_DIR, or an absolute path).
+GGUF_FILE = os.getenv("GGUF_FILE", "flux2-gguf/flux-2-klein-4b-Q4_K_M.gguf")
+# Quantise the Qwen3 text encoder to 4-bit (nf4) — ~2.5GB instead of ~8GB bf16.
+TEXT_ENCODER_4BIT = os.getenv("TEXT_ENCODER_4BIT", "1").strip().lower() in ("1", "true", "yes", "on")
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or None
 DEVICE = os.getenv("DEVICE", "cuda")
 DTYPE_NAME = os.getenv("DTYPE", "bfloat16")
-DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "8"))
-DEFAULT_CFG_SCALE = float(os.getenv("DEFAULT_CFG_SCALE", "1.0"))  # 8-step model's official cfg (4.0 is the base model)
-DEFAULT_CFG_NORM = os.getenv("CFG_NORM", "none")  # none | global | channel | cfg_zero_star
-DEFAULT_TIMESTEP_SHIFT = float(os.getenv("DEFAULT_TIMESTEP_SHIFT", "3.0"))
+DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "4"))      # klein is step-distilled
+DEFAULT_GUIDANCE = float(os.getenv("GUIDANCE_SCALE", "4.0"))
 DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
-# Reasoning ("think") pass before image generation. Off by default — it roughly
-# triples latency. A per-request `think` field overrides this server default.
-DEFAULT_THINK = os.getenv("THINK_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
-PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "2"))
+# klein is tuned for ~1MP; cap the long side. Requests above are scaled down.
+MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))
+ENABLE_CPU_OFFLOAD = os.getenv("ENABLE_CPU_OFFLOAD", "0").strip().lower() in ("1", "true", "yes", "on")
+# AI upscaler (Real-ESRGAN-class via spandrel) — used to clean up an image before
+# vectorising. 4x model; output capped to UPSCALE_MAX_DIM to keep tracing manageable.
+UPSCALER_FILE = os.getenv("UPSCALER_FILE", "upscaler/4x-UltraSharp.safetensors")
+UPSCALE_MAX_DIM = int(os.getenv("UPSCALE_MAX_DIM", "2048"))
+UPSCALE_TILE = int(os.getenv("UPSCALE_TILE", "512"))  # tile size to bound VRAM (0 = no tiling)
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
 JOB_TTL = int(os.getenv("JOB_TTL", "600"))
-NORM_MEAN = (0.5, 0.5, 0.5)
-NORM_STD = (0.5, 0.5, 0.5)
-PATCH_FACTOR = 32  # SenseNova-U1 wants W/H divisible by patch*merge size; safe fallback
+MAX_JOBS = 200
+PATCH_FACTOR = 16
 
-# Make sure the GGUF helper script and tokenizer files live next to this server
-# so `import layer_streaming` and HF AutoTokenizer resolve correctly.
-if os.path.isdir(MODELS_DIR) and MODELS_DIR not in sys.path:
-    sys.path.insert(0, MODELS_DIR)
+MAX_REF_IMAGES = 4
+MAX_REF_BYTES = 12 * 1024 * 1024
+Image.MAX_IMAGE_PIXELS = 50_000_000
 
 # ---------------------------------------------------------------------------
 # Model state
 # ---------------------------------------------------------------------------
-_pipeline = None             # holds the loaded model (or None)
-_pipeline_error: str = ""
-_torch = None                # lazy import — keeps the placeholder path lightweight
-_tokenizer = None
-_LayerStreamingWrapper = None
+_pipe = None
+_pipe_error: str = ""
+_torch = None
+_upscaler = None
+_upscaler_error: str = ""
 
 
 def _round_to_grid(value: int, factor: int = PATCH_FACTOR) -> int:
@@ -106,279 +113,108 @@ def _round_to_grid(value: int, factor: int = PATCH_FACTOR) -> int:
     return value if rem == 0 else value + (factor - rem)
 
 
-def _denorm_to_pil(batch) -> list[Image.Image]:
-    """Convert a [B, 3, H, W] tensor (mean/std normalized) to a list of PIL images."""
-    import torch  # local — safe inside this branch
-
-    mean = torch.tensor(NORM_MEAN, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
-    std = torch.tensor(NORM_STD, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
-    arr = (batch * std + mean).clamp(0, 1).float().permute(0, 2, 3, 1).cpu().numpy()
-    arr = (arr * 255.0).round().astype(np.uint8)
-    return [Image.fromarray(a) for a in arr]
+def _clamp_side(w: int, h: int) -> tuple[int, int]:
+    """Scale (w, h) down so the long side <= MAX_SIDE (preserve aspect), then snap
+    to the patch grid. Keeps FLUX at its ~1MP native resolution regardless of what
+    the caller requests."""
+    w = max(1, int(w))
+    h = max(1, int(h))
+    longest = max(w, h)
+    if longest > MAX_SIDE:
+        scale = MAX_SIDE / longest
+        w = int(round(w * scale))
+        h = int(round(h * scale))
+    return _round_to_grid(w), _round_to_grid(h)
 
 
 def _load_pipeline() -> bool:
-    """Try to load the SenseNova-U1 GGUF + config. Returns True on success."""
-    global _pipeline, _pipeline_error, _torch, _tokenizer, _LayerStreamingWrapper
+    """Load the configured engine's diffusers pipeline. Returns True on success."""
+    global _pipe, _pipe_error, _torch
 
-    if _pipeline is not None:
+    if _pipe is not None:
         return True
-
-    gguf_path = os.path.join(MODELS_DIR, GGUF_FILE)
-    if not os.path.isfile(gguf_path):
-        _pipeline_error = f"GGUF not found: {gguf_path}. Run download_model.py."
-        print(f"[ai] {_pipeline_error}")
-        return False
 
     try:
         import torch
-        from transformers import AutoConfig, AutoModel, AutoTokenizer
-        from accelerate import init_empty_weights
+        _torch = torch
     except Exception as e:  # noqa: BLE001
-        _pipeline_error = f"Missing Python deps: {e}"
-        print(f"[ai] {_pipeline_error}")
+        _pipe_error = f"torch not available: {e}"
+        print(f"[alt] {_pipe_error}")
         return False
 
-    try:
-        # The custom layer_streaming.py was downloaded into MODELS_DIR.
-        from layer_streaming import LayerStreamingWrapper  # type: ignore
-    except Exception as e:  # noqa: BLE001
-        _pipeline_error = f"layer_streaming.py not importable from {MODELS_DIR}: {e}"
-        print(f"[ai] {_pipeline_error}")
-        return False
+    dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}.get(
+        DTYPE_NAME, torch.bfloat16
+    )
 
-    # The custom Auto* classes for SenseNova-U1's NEO-Unify architecture must be
-    # available — `pip install -e .` from the OpenSenseNova/SenseNova-U1 repo
-    # registers them. If that hasn't been done we fail loudly.
     try:
-        import sensenova_u1  # noqa: F401
+        from diffusers import Flux2KleinPipeline, Flux2Transformer2DModel, GGUFQuantizationConfig
+        from transformers import Qwen3ForCausalLM, BitsAndBytesConfig
     except Exception as e:  # noqa: BLE001
-        _pipeline_error = (
-            f"sensenova_u1 package not installed: {e}. "
-            f"Clone https://github.com/OpenSenseNova/SenseNova-U1 and `pip install -e .`."
+        _pipe_error = (
+            f"FLUX.2 deps not importable: {e}. Need diffusers (main), transformers, "
+            f"bitsandbytes and gguf in the venv."
         )
-        print(f"[ai] {_pipeline_error}")
+        print(f"[flux] {_pipe_error}")
         return False
 
-    dtype = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }.get(DTYPE_NAME, torch.bfloat16)
-
-    device = DEVICE if (DEVICE == "cpu" or torch.cuda.is_available()) else "cpu"
-    if device != DEVICE:
-        print(f"[ai] CUDA unavailable, falling back to {device}")
-
-    print(f"[ai] Loading config + tokenizer from {MODELS_DIR}")
     try:
-        config = AutoConfig.from_pretrained(MODELS_DIR, trust_remote_code=False)
-        tokenizer = AutoTokenizer.from_pretrained(MODELS_DIR, trust_remote_code=False)
-        with init_empty_weights():
-            model = AutoModel.from_config(config, trust_remote_code=False)
-    except Exception as e:  # noqa: BLE001
-        _pipeline_error = f"Failed to instantiate model from config: {e}"
-        print(f"[ai] {_pipeline_error}")
-        return False
-
-    print(f"[ai] Loading GGUF weights: {gguf_path}")
-    try:
-        sd = _load_gguf_state_dict(gguf_path)
-        if LORA_FILE:
-            lora_path = os.path.join(MODELS_DIR, LORA_FILE)
-            if os.path.isfile(lora_path):
-                print(f"[ai] Applying LoRA: {lora_path}")
-                sd = _apply_lora_to_gguf_sd(sd, lora_path, dtype)
-            else:
-                print(f"[ai] LoRA file not found, skipping: {lora_path}")
-        _set_gguf_into_meta_model(model, sd, dtype, torch.device("cpu"))
-        del sd
-        gc.collect()
-    except Exception as e:  # noqa: BLE001
-        _pipeline_error = f"Failed to load GGUF weights: {e}"
-        print(f"[ai] {_pipeline_error}")
-        return False
-
-    if device != "cpu":
-        try:
-            print(f"[ai] Moving model to {device}...")
-            model = model.to(device)
-            if torch.cuda.is_available():
-                free, total = torch.cuda.mem_get_info()
-                print(f"[ai]   VRAM free={free / 1e9:.1f}GB / total={total / 1e9:.1f}GB")
-        except Exception as e:  # noqa: BLE001
-            _pipeline_error = f"Failed to move model to {device}: {e}"
-            print(f"[ai] {_pipeline_error}")
+        gguf_path = GGUF_FILE if os.path.isabs(GGUF_FILE) else os.path.join(MODELS_DIR, GGUF_FILE)
+        if not os.path.isfile(gguf_path):
+            _pipe_error = f"GGUF transformer not found: {gguf_path}. Run download_model.py."
+            print(f"[flux] {_pipe_error}")
             return False
 
-    model.eval()
-    print(f"[ai] Model ready (device={device}, dtype={DTYPE_NAME})")
-    _torch = torch
-    _tokenizer = tokenizer
-    _LayerStreamingWrapper = LayerStreamingWrapper
-    _pipeline = {"model": model, "device": device, "dtype": dtype}
-    _pipeline_error = ""
-    return True
-
-
-def _load_gguf_state_dict(path: str) -> dict:
-    """Pull a GGUF file into a {tensor_name: GGUFParameter|Tensor} dict."""
-    import torch
-    import gguf
-    from gguf import GGUFReader
-    from diffusers.quantizers.gguf.utils import (
-        SUPPORTED_GGUF_QUANT_TYPES,
-        GGUFParameter,
-    )
-
-    reader = GGUFReader(path)
-    out: dict = {}
-    for tensor in reader.tensors:
-        name = tensor.name
-        qtype = tensor.tensor_type
-        is_quant = qtype not in (
-            gguf.GGMLQuantizationType.F32,
-            gguf.GGMLQuantizationType.F16,
+        print(f"[flux] loading GGUF transformer: {gguf_path}")
+        transformer = Flux2Transformer2DModel.from_single_file(
+            gguf_path,
+            quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
+            torch_dtype=dtype,
+            config=BASE, subfolder="transformer",
+            cache_dir=MODELS_DIR, token=HF_TOKEN,
         )
-        if is_quant and qtype not in SUPPORTED_GGUF_QUANT_TYPES:
-            raise ValueError(
-                f"{name}: unsupported quantization type {qtype}. "
-                f"Supported: {sorted(str(t) for t in SUPPORTED_GGUF_QUANT_TYPES)}"
+
+        print(f"[flux] loading Qwen3 text encoder ({'4-bit nf4' if TEXT_ENCODER_4BIT else 'bf16'})")
+        te_kwargs = dict(subfolder="text_encoder", cache_dir=MODELS_DIR, torch_dtype=dtype, token=HF_TOKEN)
+        if TEXT_ENCODER_4BIT:
+            te_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype,
             )
-        weights = torch.from_numpy(tensor.data.copy())
-        out[name] = GGUFParameter(weights, quant_type=qtype) if is_quant else weights
-    del reader
-    gc.collect()
-    return out
+        text_encoder = Qwen3ForCausalLM.from_pretrained(BASE, **te_kwargs)
 
-
-def _set_gguf_into_meta_model(meta_model, state_dict, dtype, device) -> None:
-    """Wire a GGUF state_dict into a meta-instantiated transformer."""
-    from diffusers import GGUFQuantizationConfig
-    from diffusers.quantizers.gguf import GGUFQuantizer
-    from diffusers.models.model_loading_utils import load_model_dict_into_meta
-
-    quantizer = GGUFQuantizer(
-        quantization_config=GGUFQuantizationConfig(compute_dtype=dtype)
-    )
-    quantizer.pre_quantized = True
-    quantizer._process_model_before_weight_loading(
-        meta_model,
-        device_map={"": device} if device else None,
-        state_dict=state_dict,
-    )
-    load_model_dict_into_meta(
-        meta_model,
-        state_dict,
-        hf_quantizer=quantizer,
-        device_map={"": device} if device else None,
-        dtype=dtype,
-    )
-    quantizer._process_model_after_weight_loading(meta_model)
-
-
-def _apply_lora_to_gguf_sd(state_dict: dict, lora_path: str, dtype) -> dict:
-    """Fold a kohya-style safetensors LoRA into a GGUF state dict at load time.
-
-    For each base weight with a matching {prefix}.lora_down/.lora_up/.alpha,
-    dequantize the GGUF tensor, add delta_W = (alpha/rank)*(up@down), then
-    RE-QUANTIZE the merged result to Q8_0. ComfyUI leaves the touched tensors as
-    bf16, which ~doubles resident VRAM (~16GB -> ~28GB) and OOMs edits on a 32GB
-    card; re-quantizing keeps memory near the original GGUF size. Q8_0 round-trips
-    at ~1e-4 error (the gguf lib can't write K-quants, but Q8_0 is high precision).
-    """
-    import torch
-    from safetensors.torch import safe_open
-    from diffusers.quantizers.gguf.utils import dequantize_gguf_tensor, GGUFParameter
-    try:
-        from gguf.quants import quantize as _gguf_quantize
-        from gguf import GGMLQuantizationType
-        _q8 = GGMLQuantizationType.Q8_0
-    except Exception:
-        _gguf_quantize, _q8 = None, None
-
-    lora_sd: dict = {}
-    with safe_open(lora_path, framework="pt", device="cpu") as f:
-        for k in f.keys():
-            lora_sd[k] = f.get_tensor(k)
-
-    applied = requant = 0
-    out: dict = {}
-    for key, weight in state_dict.items():
-        prefix = key[: -len(".weight")] if key.endswith(".weight") else None
-        down = lora_sd.get(f"{prefix}.lora_down.weight") if prefix else None
-        if weight is None or down is None:
-            out[key] = weight
-            continue
-        up = lora_sd[f"{prefix}.lora_up.weight"]
-        rank = down.shape[0]
-        alpha = float(lora_sd.get(f"{prefix}.alpha", rank))
-        delta = (alpha / rank) * torch.matmul(up.float(), down.float())
-        if getattr(weight, "quant_type", None) is not None:
-            base = dequantize_gguf_tensor(weight).to(torch.float32)
+        print("[flux] assembling Flux2KleinPipeline")
+        pipe = Flux2KleinPipeline.from_pretrained(
+            BASE, transformer=transformer, text_encoder=text_encoder,
+            torch_dtype=dtype, cache_dir=MODELS_DIR, token=HF_TOKEN,
+        )
+        if ENABLE_CPU_OFFLOAD:
+            pipe.enable_model_cpu_offload()
         else:
-            base = weight.to(torch.float32)
-        merged = (base + delta).contiguous()
-        placed = False
-        if _gguf_quantize is not None:
-            try:
-                q = _gguf_quantize(merged.numpy(), _q8)
-                out[key] = GGUFParameter(torch.from_numpy(q), quant_type=_q8)
-                requant += 1
-                placed = True
-            except Exception:
-                placed = False
-        if not placed:
-            out[key] = merged.to(dtype)  # fallback: full precision (more VRAM)
-        del base, delta, merged
-        applied += 1
-    print(f"[ai] LoRA merged into {applied} tensors ({requant} re-quantized Q8_0) "
-          f"from {os.path.basename(lora_path)}")
-    del lora_sd
-    gc.collect()
-    return out
+            pipe = pipe.to(DEVICE)
+        # Tile/slice the VAE decode to cut the peak-VRAM spike (no quality loss).
+        try:
+            pipe.vae.enable_tiling()
+            pipe.vae.enable_slicing()
+        except Exception:
+            pass
+
+        try:
+            free, total = torch.cuda.mem_get_info()
+            print(f"[flux]   VRAM used={(total - free) / 1e9:.1f}GB / {total / 1e9:.1f}GB")
+        except Exception:
+            pass
+
+        _pipe = {"pipe": pipe, "device": DEVICE, "dtype": dtype}
+        _pipe_error = ""
+        print("[flux] Model ready (FLUX.2-klein-4B: GGUF transformer + 4-bit text encoder)")
+        return True
+    except Exception as e:  # noqa: BLE001
+        _pipe_error = f"FLUX load failed: {e}"
+        print(f"[flux] {_pipe_error}")
+        _pipe = None
+        return False
 
 
-# ---------------------------------------------------------------------------
-# Prompt enhancement (uses the local model — no external API)
-# ---------------------------------------------------------------------------
-# Deterministic prompt enhancement: append design-type style guidance. SenseNova-U1's
-# direct language-model text path produces degenerate output under GGUF quantization
-# (its image path is fine), so we use a fast, reliable template instead of an LLM
-# rewrite — instant and never garbage.
-# Visual style cues appended for enhancement. ONLY for design types where this
-# model won't paint the cues as literal text. Text-heavy types (flyer/social/
-# banner) are deliberately excluded — there the model renders appended words onto
-# the design, so those use the user's prompt as-is.
-_ENHANCE_STYLE: dict[str, str] = {
-    "logo": "flat vector logo, minimal, clean geometric shapes, solid background, high contrast",
-    "custom": "clean balanced composition, rich colour, soft lighting, detailed",
-}
-
-
-def _run_enhance(prompt: str, design_type: str | None = None) -> str:
-    """Augment a short prompt with design-type style guidance.
-
-    Deterministic and instant. SenseNova-U1's direct language-model text path
-    produces degenerate output under GGUF quantization (its image path is fine),
-    so we append curated style keywords rather than a slow, unreliable LLM rewrite.
-    """
-    base = (prompt or "").strip().rstrip(" .,")
-    if not base:
-        return prompt
-    # No entry (flyer/social/banner) => leave the prompt untouched so style cues
-    # aren't rendered as literal text on text-heavy designs.
-    style = _ENHANCE_STYLE.get((design_type or "custom").lower())
-    return f"{base}, {style}" if style else base
-
-
-# ---------------------------------------------------------------------------
-# Diffusion calls (real model path)
-# ---------------------------------------------------------------------------
 def _free_vram() -> None:
-    """Release cached CUDA activations between jobs so VRAM doesn't creep into OOM
-    (the LoRA-merged model is large; edits need the reclaimed headroom). Also runs
-    after a failed forward so a partial allocation doesn't poison the next request."""
     try:
         gc.collect()
         if _torch is not None and _torch.cuda.is_available():
@@ -387,116 +223,131 @@ def _free_vram() -> None:
         pass
 
 
-def _run_t2i(prompt: str, width: int, height: int, *, steps: int, cfg_scale: float,
-             seed: int, batch_size: int, think_mode: bool = True,
-             cfg_norm: str = "none", timestep_shift: float = DEFAULT_TIMESTEP_SHIFT) -> tuple[list[Image.Image], str]:
-    model = _pipeline["model"]
+def _load_upscaler() -> bool:
+    """Lazy-load the SR model (spandrel). Returns True on success."""
+    global _upscaler, _upscaler_error, _torch
+    if _upscaler is not None:
+        return True
     try:
-        with _torch.inference_mode():
-            out = model.t2i_generate(
-                _tokenizer,
-                prompt,
-                image_size=(width, height),
-                cfg_scale=cfg_scale,
-                cfg_norm=cfg_norm,
-                timestep_shift=timestep_shift,
-                cfg_interval=(0.0, 1.0),
-                num_steps=steps,
-                batch_size=batch_size,
-                seed=seed,
-                think_mode=think_mode,
-            )
-        # think_mode=True returns (tensor, think_text); otherwise just tensor.
-        tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
-        return _denorm_to_pil(tensor), think_text
-    finally:
-        _free_vram()
+        import torch
+        _torch = torch
+        from spandrel import ModelLoader
+    except Exception as e:  # noqa: BLE001
+        _upscaler_error = f"spandrel/torch not available: {e}"
+        print(f"[up] {_upscaler_error}")
+        return False
+    path = UPSCALER_FILE if os.path.isabs(UPSCALER_FILE) else os.path.join(MODELS_DIR, UPSCALER_FILE)
+    if not os.path.isfile(path):
+        _upscaler_error = f"upscaler model not found: {path}. Run download_model.py."
+        print(f"[up] {_upscaler_error}")
+        return False
+    try:
+        model = ModelLoader().load_from_file(path)
+        model.to(DEVICE).eval()
+        _upscaler = model
+        _upscaler_error = ""
+        print(f"[up] upscaler ready (x{getattr(model, 'scale', '?')})")
+        return True
+    except Exception as e:  # noqa: BLE001
+        _upscaler_error = f"upscaler load failed: {e}"
+        print(f"[up] {_upscaler_error}")
+        _upscaler = None
+        return False
 
 
-def _run_edit(prompt: str, ref_images: list[Image.Image], width: int, height: int, *,
-              steps: int, cfg_scale: float, img_cfg_scale: float, seed: int,
-              think_mode: bool = True, cfg_norm: str = "none",
-              timestep_shift: float = DEFAULT_TIMESTEP_SHIFT) -> tuple[list[Image.Image], str]:
-    model = _pipeline["model"]
+def _upscale_pil(img: Image.Image, max_dim: int = 0) -> Optional[Image.Image]:
+    """Upscale with the SR model, tiled to bound VRAM, then cap the long side to
+    max_dim (Lanczos). Returns None if the model isn't available."""
+    import numpy as np
+    if not _load_upscaler():
+        return None
+    torch = _torch
+    model = _upscaler
+    scale = int(getattr(model, "scale", 4) or 4)
+    src = img.convert("RGB")
+    W, H = src.width, src.height
+    arr = np.asarray(src, dtype=np.float32) / 255.0
+    t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
+    out = torch.zeros((1, 3, H * scale, W * scale), dtype=t.dtype, device=DEVICE)
+    tile = UPSCALE_TILE if UPSCALE_TILE > 0 else max(W, H)
+    pad = 16  # overlap to hide tile seams
     try:
-        with _torch.inference_mode():
-            out = model.it2i_generate(
-                _tokenizer,
-                prompt,
-                ref_images,
-                image_size=(width, height),
-                cfg_scale=cfg_scale,
-                img_cfg_scale=img_cfg_scale,
-                cfg_norm=cfg_norm,
-                timestep_shift=timestep_shift,
-                cfg_interval=(0.0, 1.0),
-                num_steps=steps,
-                batch_size=1,
-                seed=seed,
-                think_mode=think_mode,
-            )
-        tensor, think_text = out if (think_mode and isinstance(out, tuple)) else (out, "")
-        return _denorm_to_pil(tensor), think_text
+        with torch.inference_mode():
+            for y in range(0, H, tile):
+                for x in range(0, W, tile):
+                    x0, y0 = max(0, x - pad), max(0, y - pad)
+                    x1, y1 = min(W, x + tile + pad), min(H, y + tile + pad)
+                    up = model(t[:, :, y0:y1, x0:x1]).clamp(0, 1)
+                    cl, ct = (x - x0) * scale, (y - y0) * scale
+                    cw, ch = min(tile, W - x) * scale, min(tile, H - y) * scale
+                    out[:, :, y * scale:y * scale + ch, x * scale:x * scale + cw] = up[:, :, ct:ct + ch, cl:cl + cw]
+        res_arr = (out.clamp(0, 1).squeeze(0).permute(1, 2, 0).float().cpu().numpy() * 255.0).round().astype(np.uint8)
+        res = Image.fromarray(res_arr)
     finally:
+        del t, out
         _free_vram()
+    if max_dim and max(res.size) > max_dim:
+        s = max_dim / max(res.size)
+        res = res.resize((max(1, round(res.width * s)), max(1, round(res.height * s))), Image.LANCZOS)
+    return res
+
+
+def _run(prompt: str, width: int, height: int, steps: int, guidance: float,
+         seed: int, ref_pils: Optional[list] = None) -> Image.Image:
+    pipe = _pipe["pipe"]
+    gen = _torch.Generator(device=_pipe["device"] if not ENABLE_CPU_OFFLOAD else "cpu").manual_seed(int(seed) % (2**63 - 1))
+    call_kwargs = dict(
+        prompt=prompt,
+        num_inference_steps=steps,
+        guidance_scale=guidance,
+        height=height,
+        width=width,
+        generator=gen,
+    )
+    if ref_pils:
+        # FLUX.2 conditions on reference image(s) via image=; multi-image supported.
+        call_kwargs["image"] = ref_pils if len(ref_pils) > 1 else ref_pils[0]
+    with _torch.inference_mode():
+        out = pipe(**call_kwargs)
+    return out.images[0]
 
 
 # ---------------------------------------------------------------------------
-# Placeholder fallback (used when the model can't load — keeps the FE working)
+# Helpers
 # ---------------------------------------------------------------------------
-_PALETTE = [
-    (4, 120, 87), (15, 118, 110), (124, 58, 237), (225, 29, 72),
-    (217, 119, 6), (71, 85, 105), (220, 38, 38), (37, 99, 235),
-]
-
-
 def _placeholder_image(prompt: str, width: int, height: int, seed: int) -> Image.Image:
-    rng = random.Random(seed)
-    fg = rng.choice(_PALETTE)
-    bg = (250, 250, 247)
-    img = Image.new("RGB", (width, height), bg)
-    draw = ImageDraw.Draw(img)
-    # A simple radial-style swatch so the placeholder isn't visually empty.
-    for i in range(40):
-        t = i / 40
-        r = int(min(width, height) * (0.5 - t / 2.5))
-        cx = width // 2 + rng.randint(-12, 12)
-        cy = height // 2 + rng.randint(-12, 12)
-        col = (
-            int(fg[0] * (1 - t * 0.7) + bg[0] * (t * 0.7)),
-            int(fg[1] * (1 - t * 0.7) + bg[1] * (t * 0.7)),
-            int(fg[2] * (1 - t * 0.7) + bg[2] * (t * 0.7)),
-        )
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=col)
-
-    label = (prompt or "5cd").strip()[:60]
-    try:
-        font = ImageFont.truetype("arial.ttf", max(20, height // 22))
-    except Exception:
-        font = ImageFont.load_default()
-    bbox = draw.textbbox((0, 0), label, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    pad = 14
-    box = (
-        (width - tw) // 2 - pad,
-        height - th - 60 - pad,
-        (width + tw) // 2 + pad,
-        height - 60 + pad,
-    )
-    draw.rounded_rectangle(box, radius=14, fill=(255, 255, 255, 230))
-    draw.text(((width - tw) // 2, height - th - 60), label, fill=(30, 30, 30), font=font)
-    draw.text(
-        (16, height - 30),
-        "[placeholder — SenseNova-U1 not loaded]",
-        fill=(120, 120, 120),
-        font=ImageFont.load_default(),
-    )
+    rnd = random.Random(seed)
+    c1 = (rnd.randint(40, 120), rnd.randint(40, 120), rnd.randint(80, 160))
+    img = Image.new("RGB", (width, height), c1)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, height - 60, width, height), fill=(0, 0, 0))
+    d.text((14, height - 44), f"[{ENGINE} placeholder] {prompt[:80]}", fill=(255, 255, 255))
     return img
 
 
+def _pil_to_b64(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _b64_to_pil(b64: str) -> Image.Image:
+    if not isinstance(b64, str):
+        raise ValueError("ref image must be a base64 string")
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[-1]
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"invalid base64 ref image: {e}")
+    if len(raw) > MAX_REF_BYTES:
+        raise ValueError("ref image too large")
+    Image.open(io.BytesIO(raw)).verify()
+    return Image.open(io.BytesIO(raw)).convert("RGB")
+
+
 # ---------------------------------------------------------------------------
-# Job queue
+# Jobs
 # ---------------------------------------------------------------------------
 class Job:
     __slots__ = ("id", "type", "params", "status", "progress", "result",
@@ -514,13 +365,8 @@ class Job:
         self.completed_at: Optional[float] = None
 
     def to_dict(self) -> dict:
-        d = {
-            "job_id": self.id,
-            "type": self.type,
-            "status": self.status,
-            "progress": self.progress,
-            "created_at": self.created_at,
-        }
+        d = {"job_id": self.id, "type": self.type, "status": self.status,
+             "progress": self.progress, "created_at": self.created_at}
         if self.error:
             d["error"] = self.error
         if self.completed_at:
@@ -535,23 +381,12 @@ _jobs: "OrderedDict[str, Job]" = OrderedDict()
 _queue: Optional[asyncio.Queue] = None
 
 
-MAX_JOBS = 200  # hard cap on retained job records (LRU eviction beyond this)
-
-
 def _cleanup_jobs() -> None:
     now = time.time()
-    # TTL eviction for finished jobs.
-    expired = [j for j, job in _jobs.items()
-               if job.completed_at and now - job.completed_at > JOB_TTL]
-    for j in expired:
+    for j in [j for j, job in _jobs.items() if job.completed_at and now - job.completed_at > JOB_TTL]:
         _jobs.pop(j, None)
-    # Hard cap so abandoned/queued jobs can't leak memory unbounded — drop the
-    # oldest finished jobs first, falling back to the oldest record overall.
     while len(_jobs) > MAX_JOBS:
-        victim = next((j for j, job in _jobs.items()
-                       if job.status in ("completed", "failed")), None)
-        if victim is None:
-            victim = next(iter(_jobs), None)
+        victim = next((j for j, job in _jobs.items() if job.status in ("completed", "failed")), None) or next(iter(_jobs), None)
         if victim is None:
             break
         _jobs.pop(victim, None)
@@ -567,135 +402,59 @@ def _queue_position(job_id: str) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _pil_to_b64(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
-
-
-# Bound untrusted ref-image inputs to avoid OOM / decompression-bomb DoS.
-MAX_REF_IMAGES = 4
-MAX_REF_BYTES = 12 * 1024 * 1024  # 12 MB decoded per ref image
-Image.MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP ceiling
-
-
-def _b64_to_pil(b64: str) -> Image.Image:
-    if not isinstance(b64, str):
-        raise ValueError("ref image must be a base64 string")
-    if b64.startswith("data:"):  # tolerate data-URL prefixes
-        b64 = b64.split(",", 1)[-1]
-    try:
-        raw = base64.b64decode(b64, validate=True)
-    except Exception as e:  # noqa: BLE001
-        raise ValueError(f"invalid base64 ref image: {e}")
-    if len(raw) > MAX_REF_BYTES:
-        raise ValueError("ref image too large")
-    Image.open(io.BytesIO(raw)).verify()  # reject truncated/corrupt data
-    return Image.open(io.BytesIO(raw)).convert("RGB")
-
-
-# ---------------------------------------------------------------------------
-# Job processing
-# ---------------------------------------------------------------------------
 def _process_generate(job: Job) -> None:
     p = job.params
     raw_prompt = (p.get("prompt") or "").strip() or "Untitled design"
     num = max(1, min(int(p.get("num_concepts", 1)), 6))
-    width = _round_to_grid(int(p.get("width", DEFAULT_WIDTH)))
-    height = _round_to_grid(int(p.get("height", DEFAULT_HEIGHT)))
-    steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 100))
-    cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE))
-    cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
-    ts_shift = float(p.get("timestep_shift") or DEFAULT_TIMESTEP_SHIFT)
-    enhance = bool(p.get("enhance"))
-    think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
-    design_type = p.get("design_type")
+    width, height = _clamp_side(int(p.get("width", DEFAULT_WIDTH)), int(p.get("height", DEFAULT_HEIGHT)))
+    steps = max(1, min(int(p.get("steps", DEFAULT_STEPS)), 50))
+    # Use an explicit guidance_scale if the caller set one, else the FLUX default.
+    # The legacy cfg_scale field is ignored (it was the old SenseNova knob, sent as 1.0).
+    _g = p.get("guidance_scale")
+    guidance = float(_g) if _g is not None else DEFAULT_GUIDANCE
     base_seed = p.get("seed")
     if base_seed is None:
         base_seed = random.randint(0, 2**31 - 1)
 
-    # Optional reference image(s): generate guided by them (it2i) instead of pure
-    # text-to-image. img_cfg_scale controls how strongly the reference is followed.
-    refs_b64 = p.get("ref_images") or []
-    img_cfg = float(p.get("img_cfg_scale") or 1.0)
-    ref_pils = []
-    if refs_b64:
-        try:
-            ref_pils = [_b64_to_pil(b) for b in refs_b64[:MAX_REF_IMAGES]]
-        except Exception as e:  # noqa: BLE001
-            print(f"[ai] {job.id} ref decode failed, ignoring refs: {e}")
-            ref_pils = []
-
     have_model = _load_pipeline()
-
-    # Optionally expand the short user prompt into a full design brief first.
-    enhanced_prompt = ""
-    prompt = raw_prompt
-    if enhance and have_model:
-        try:
-            enhanced_prompt = _run_enhance(raw_prompt, design_type)
-            prompt = enhanced_prompt
-            print(f"[ai] {job.id} enhanced: {raw_prompt!r} -> {enhanced_prompt[:120]!r}")
-        except Exception as e:  # noqa: BLE001
-            print(f"[ai] {job.id} enhance failed, falling back: {e}")
-            enhanced_prompt = ""
-
     images_b64: list[str] = []
-    think_texts: list[str] = []
     placeholder_flags: list[bool] = []
     real_count = 0
     last_error = ""
 
-    for i in range(num):
-        seed = int(base_seed) + i
-        is_ph = True
-        if have_model:
-            try:
-                if ref_pils:
-                    pil, think_text = _run_edit(prompt, ref_pils, width, height,
-                                                steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg,
-                                                seed=seed, think_mode=think_flag, cfg_norm=cfg_norm,
-                                                timestep_shift=ts_shift)
-                else:
-                    pil, think_text = _run_t2i(prompt, width, height,
-                                               steps=steps, cfg_scale=cfg, seed=seed,
-                                               batch_size=1, think_mode=think_flag, cfg_norm=cfg_norm,
-                                               timestep_shift=ts_shift)
-                img = pil[0]
-                real_count += 1
-                is_ph = False
-            except Exception as e:  # noqa: BLE001
-                # Fall back to a placeholder for THIS concept only; keep the model
-                # loaded so the rest of the batch (and future jobs) still use it.
-                last_error = f"Inference failed: {e}"
-                print(f"[ai] {job.id} concept {i} failed: {e}")
-                img = _placeholder_image(prompt, width, height, seed)
-                think_text = ""
-        else:
-            img = _placeholder_image(prompt, width, height, seed)
-            think_text = ""
-        images_b64.append(_pil_to_b64(img))
-        think_texts.append(think_text)
-        placeholder_flags.append(is_ph)
-        job.progress = int(((i + 1) / num) * 100)
+    try:
+        for i in range(num):
+            seed = int(base_seed) + i
+            is_ph = True
+            if have_model:
+                try:
+                    img = _run(raw_prompt, width, height, steps, guidance, seed)
+                    real_count += 1
+                    is_ph = False
+                except Exception as e:  # noqa: BLE001
+                    last_error = f"Inference failed: {e}"
+                    print(f"[alt] {job.id} concept {i} failed: {e}")
+                    img = _placeholder_image(raw_prompt, width, height, seed)
+            else:
+                img = _placeholder_image(raw_prompt, width, height, seed)
+            images_b64.append(_pil_to_b64(img))
+            placeholder_flags.append(is_ph)
+            job.progress = int(((i + 1) / num) * 100)
+    finally:
+        _free_vram()
 
-    # The whole job is "placeholder" only if NO real concept was produced.
     placeholder = real_count == 0
     job.result = {
         "images": images_b64,
-        "think": think_texts,
-        "enhanced_prompt": enhanced_prompt,
-        "placeholder_flags": placeholder_flags,  # per-concept: True where a placeholder was used
-        "model": "placeholder" if placeholder else "sensenova-u1",
+        "enhanced_prompt": "",
+        "placeholder_flags": placeholder_flags,
+        "model": "placeholder" if placeholder else ENGINE,
         "width": width,
         "height": height,
         "steps": steps,
-        "cfg_scale": cfg,
+        "guidance_scale": guidance,
         "placeholder": placeholder,
-        "error": (_pipeline_error or last_error) if placeholder else "",
+        "error": (_pipe_error or last_error) if placeholder else "",
     }
 
 
@@ -705,184 +464,73 @@ def _process_edit(job: Job) -> None:
     refs_b64 = p.get("ref_images") or []
     if not refs_b64:
         raise ValueError("edit job requires at least one ref image")
-    if len(refs_b64) > MAX_REF_IMAGES:
-        raise ValueError(f"too many ref images (max {MAX_REF_IMAGES})")
-    refs = [_b64_to_pil(b) for b in refs_b64]
-    # Use `or` rather than dict.get default — pydantic sends Optional[int] fields
-    # as explicit None, which dict.get will happily return.
-    width = _round_to_grid(int(p.get("width") or refs[0].width))
-    height = _round_to_grid(int(p.get("height") or refs[0].height))
-    steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 100))
-    cfg = float(p.get("cfg_scale", DEFAULT_CFG_SCALE) or DEFAULT_CFG_SCALE)
-    img_cfg = float(p.get("img_cfg_scale") or 1.0)
-    cfg_norm = str(p.get("cfg_norm") or DEFAULT_CFG_NORM)
-    ts_shift = float(p.get("timestep_shift") or DEFAULT_TIMESTEP_SHIFT)
-    think_flag = DEFAULT_THINK if p.get("think") is None else bool(p.get("think"))
+    refs = [_b64_to_pil(b) for b in refs_b64[:MAX_REF_IMAGES]]
+    width, height = _clamp_side(int(p.get("width") or refs[0].width), int(p.get("height") or refs[0].height))
+    steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 50))
+    _g = p.get("guidance_scale")
+    guidance = float(_g) if _g is not None else DEFAULT_GUIDANCE
     seed = p.get("seed")
     if seed is None:
         seed = random.randint(0, 2**31 - 1)
 
     have_model = _load_pipeline()
-    think_text = ""
     edit_error = ""
     if have_model:
         try:
-            pil, think_text = _run_edit(prompt, refs, width, height,
-                                        steps=steps, cfg_scale=cfg, img_cfg_scale=img_cfg,
-                                        seed=int(seed), think_mode=think_flag, cfg_norm=cfg_norm,
-                                        timestep_shift=ts_shift)
-            img = pil[0]
+            img = _run(prompt, width, height, steps, guidance, int(seed), ref_pils=refs)
         except Exception as e:  # noqa: BLE001
-            # Fall back to a placeholder for THIS job only; keep the model loaded so a
-            # single bad edit doesn't brick all future jobs. Use a LOCAL error — do NOT
-            # write the load-error global (_pipeline_error); it never clears and would
-            # poison /status, /api/health, and later jobs.
             edit_error = f"Edit inference failed: {e}"
-            print(f"[ai] {job.id} edit failed: {e}")
+            print(f"[alt] {job.id} edit failed: {e}")
             have_model = False
             img = _placeholder_image(prompt, width, height, int(seed))
     else:
-        # Composite the edit prompt onto the first ref so the FE shows something.
-        img = refs[0].copy()
-        d = ImageDraw.Draw(img)
-        d.rectangle((0, img.height - 50, img.width, img.height), fill=(0, 0, 0))
-        d.text((12, img.height - 38), f"placeholder edit: {prompt[:80]}",
-               fill=(255, 255, 255))
+        img = _placeholder_image(prompt, width, height, int(seed))
 
+    _free_vram()
     job.progress = 100
     job.result = {
         "images": [_pil_to_b64(img)],
-        "think": [think_text],
-        "model": "sensenova-u1" if have_model else "placeholder",
+        "model": ENGINE if have_model else "placeholder",
         "width": width,
         "height": height,
         "steps": steps,
-        "cfg_scale": cfg,
+        "guidance_scale": guidance,
         "placeholder": not have_model,
-        "error": (edit_error or _pipeline_error) if not have_model else "",
-    }
-
-
-def _process_chat(job: Job) -> None:
-    """Generate a text response. If a reference image is supplied the model uses
-    visual understanding (image + question -> text); otherwise it runs the
-    underlying language model standalone (pure text-to-text)."""
-    p = job.params
-    prompt = (p.get("prompt") or "").strip()
-    if not prompt:
-        raise ValueError("chat job requires a prompt")
-    ref_b64 = p.get("ref_image")
-    # Cap default at 512 tokens — a chat reply, not an essay. Users can opt into more.
-    max_new = max(1, min(int(p.get("max_new_tokens") or 512), 8192))
-    temperature = float(p.get("temperature") or 0.6)
-    top_p = float(p.get("top_p") or 0.95)
-    top_k = int(p.get("top_k") or 20)
-    rep_pen = float(p.get("repetition_penalty") or 1.05)
-
-    have_model = _load_pipeline()
-    if not have_model:
-        job.result = {
-            "text": "Model is not available right now. Try again shortly.",
-            "model": "placeholder",
-            "placeholder": True,
-            "error": _pipeline_error,
-        }
-        return
-
-    model = _pipeline["model"]
-    device = _pipeline["device"]
-
-    gen_kwargs = dict(
-        max_new_tokens=max_new,
-        do_sample=True,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repetition_penalty=rep_pen,
-    )
-
-    try:
-        with _torch.inference_mode():
-            if ref_b64:
-                # Visual understanding path — give the model the image as context.
-                from sensenova_u1.models.neo_unify.utils import load_image_native
-                img = _b64_to_pil(ref_b64)
-                pixel_values, grid_hw = load_image_native(img)
-                pixel_values = pixel_values.to(device, dtype=_pipeline["dtype"])
-                grid_hw = grid_hw.to(device)
-                response, _hist = model.chat(
-                    _tokenizer, pixel_values, prompt, gen_kwargs,
-                    return_history=True, grid_hw=grid_hw,
-                )
-            else:
-                # Pure text-to-text — call the underlying Qwen3 LLM directly.
-                # Pass attention_mask explicitly and use a distinct pad_token so the
-                # generation can stop on EOS instead of running to max_new_tokens.
-                messages = [{"role": "user", "content": prompt}]
-                text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-                inputs = _tokenizer(text, return_tensors="pt").to(device)
-                eos_id = _tokenizer.eos_token_id
-                pad_id = _tokenizer.pad_token_id if _tokenizer.pad_token_id is not None else eos_id
-                output = model.language_model.generate(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                    eos_token_id=eos_id,
-                    pad_token_id=pad_id,
-                    **gen_kwargs,
-                )
-                response = _tokenizer.decode(output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-    except Exception as e:  # noqa: BLE001
-        job.result = {
-            "text": "",
-            "model": "sensenova-u1",
-            "placeholder": False,
-            "error": f"Chat failed: {e}",
-        }
-        return
-
-    job.result = {
-        "text": response,
-        "model": "sensenova-u1",
-        "with_image": bool(ref_b64),
-        "placeholder": False,
-        "error": "",
+        "error": (edit_error or _pipe_error) if not have_model else "",
     }
 
 
 async def _worker() -> None:
-    print("[ai] Worker started")
+    print(f"[alt] Worker started (engine={ENGINE}, edit={'yes' if SUPPORTS_EDIT else 'no'})")
     while True:
         job = await _queue.get()  # type: ignore[union-attr]
         try:
             job.status = "processing"
             job.progress = 0
             t0 = time.time()
-            print(f"[ai] {job.id} ({job.type}) start")
+            print(f"[alt] {job.id} ({job.type}) start")
             loop = asyncio.get_event_loop()
             if job.type == "generate":
                 await loop.run_in_executor(None, _process_generate, job)
             elif job.type == "edit":
                 await loop.run_in_executor(None, _process_edit, job)
-            elif job.type == "chat":
-                await loop.run_in_executor(None, _process_chat, job)
             else:
                 raise ValueError(f"unknown job type: {job.type}")
             job.status = "completed"
             job.progress = 100
             job.completed_at = time.time()
-            print(f"[ai] {job.id} done in {time.time() - t0:.1f}s")
+            print(f"[alt] {job.id} done in {time.time() - t0:.1f}s")
         except Exception as e:  # noqa: BLE001
             job.status = "failed"
             job.error = str(e)
             job.completed_at = time.time()
-            print(f"[ai] {job.id} failed: {e}")
+            print(f"[alt] {job.id} failed: {e}")
         finally:
             _queue.task_done()  # type: ignore[union-attr]
             _cleanup_jobs()
 
 
 async def _periodic_cleanup() -> None:
-    # Evict expired/old jobs even when no new job arrives to trigger cleanup.
     while True:
         await asyncio.sleep(60)
         try:
@@ -892,60 +540,49 @@ async def _periodic_cleanup() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Request models
+# Request models + app
 # ---------------------------------------------------------------------------
 class GenerateRequest(BaseModel):
     prompt: str
     num_concepts: int = Field(1, ge=1, le=6)
     width: int = DEFAULT_WIDTH
     height: int = DEFAULT_HEIGHT
-    steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
-    cfg_scale: float = DEFAULT_CFG_SCALE
-    cfg_norm: Optional[str] = None     # none|global|channel|cfg_zero_star; None = server default
-    timestep_shift: Optional[float] = None  # None = server default
+    steps: int = Field(DEFAULT_STEPS, ge=1, le=50)
+    guidance_scale: Optional[float] = None
+    cfg_scale: Optional[float] = None  # legacy field, ignored (FLUX uses guidance_scale)
     seed: Optional[int] = None
     enhance: bool = False
-    think: Optional[bool] = None       # override THINK_MODE per request; None = server default
-    design_type: Optional[str] = None  # "logo" | "social" | "banner" | "flyer" | "custom"
-    ref_images: Optional[list[str]] = None  # optional style/subject reference -> it2i-guided generation
-    img_cfg_scale: float = 1.0             # ref adherence when ref_images given (lower = looser style hint)
+    design_type: Optional[str] = None
+    ref_images: Optional[list[str]] = None
+    img_cfg_scale: Optional[float] = None
+    cfg_norm: Optional[str] = None
+    timestep_shift: Optional[float] = None
+    think: Optional[bool] = None
 
 
 class EditRequest(BaseModel):
     prompt: str
-    ref_images: list[str]              # base64-encoded PNGs
+    ref_images: list[str]
     width: Optional[int] = Field(None, ge=256, le=4096)
     height: Optional[int] = Field(None, ge=256, le=4096)
-    steps: int = Field(DEFAULT_STEPS, ge=1, le=100)
-    cfg_scale: float = DEFAULT_CFG_SCALE
-    img_cfg_scale: float = 1.0
-    cfg_norm: Optional[str] = None     # none|global|channel|cfg_zero_star; None = server default
-    timestep_shift: Optional[float] = None  # None = server default
+    steps: int = Field(DEFAULT_STEPS, ge=1, le=50)
+    guidance_scale: Optional[float] = None
+    cfg_scale: Optional[float] = None
+    img_cfg_scale: Optional[float] = None
     seed: Optional[int] = None
-    think: Optional[bool] = None       # override THINK_MODE per request; None = server default
+    cfg_norm: Optional[str] = None
+    timestep_shift: Optional[float] = None
+    think: Optional[bool] = None
 
 
-class ChatRequest(BaseModel):
-    prompt: str
-    ref_image: Optional[str] = None    # base64-encoded PNG; when supplied the model uses VQA
-    max_new_tokens: int = Field(512, ge=1, le=8192)
-    temperature: float = 0.6
-    top_p: float = 0.95
-    top_k: int = 20
-    repetition_penalty: float = 1.05
+class UpscaleRequest(BaseModel):
+    image: str                       # base64 PNG/JPEG
+    max_dim: Optional[int] = None    # cap the long side of the result (default UPSCALE_MAX_DIM)
 
 
-# ---------------------------------------------------------------------------
-# App + endpoints
-# ---------------------------------------------------------------------------
-app = FastAPI(title="5cd-single AI Worker", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,  # worker is called server-to-server; no cookies/credentials, and '*' + credentials is invalid
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="5cd image worker (FLUX.2-klein-4B)", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+                   allow_methods=["*"], allow_headers=["*"])
 
 
 @app.on_event("startup")
@@ -954,34 +591,15 @@ async def _startup() -> None:
     _queue = asyncio.Queue(maxsize=MAX_QUEUE)
     asyncio.create_task(_worker())
     asyncio.create_task(_periodic_cleanup())
-    # Try once at startup so the first request doesn't pay the load cost.
     _load_pipeline()
 
 
 async def _enqueue(job: Job) -> bool:
-    if _queue is None:
-        return False
-    if _queue.full():
+    if _queue is None or _queue.full():
         return False
     _jobs[job.id] = job
     await _queue.put(job)
     return True
-
-
-async def _wait_for_job(job: Job) -> None:
-    while job.status in ("queued", "processing"):
-        await asyncio.sleep(0.4)
-
-
-@app.post("/api/generate")
-async def api_generate(req: GenerateRequest):
-    job = Job("generate", req.model_dump())
-    if not await _enqueue(job):
-        return JSONResponse({"error": "queue full"}, status_code=503)
-    await _wait_for_job(job)
-    if job.status == "failed":
-        return JSONResponse({"error": job.error}, status_code=500)
-    return JSONResponse({"job_id": job.id, **(job.result or {})})
 
 
 @app.post("/api/generate/async")
@@ -989,47 +607,34 @@ async def api_generate_async(req: GenerateRequest):
     job = Job("generate", req.model_dump())
     if not await _enqueue(job):
         return JSONResponse({"error": "queue full"}, status_code=503)
-    return JSONResponse({
-        "job_id": job.id,
-        "status": "queued",
-        "queue_position": _queue_position(job.id),
-    })
-
-
-@app.post("/api/edit")
-async def api_edit(req: EditRequest):
-    job = Job("edit", req.model_dump())
-    if not await _enqueue(job):
-        return JSONResponse({"error": "queue full"}, status_code=503)
-    await _wait_for_job(job)
-    if job.status == "failed":
-        return JSONResponse({"error": job.error}, status_code=500)
-    return JSONResponse({"job_id": job.id, **(job.result or {})})
+    return JSONResponse({"job_id": job.id, "status": "queued", "queue_position": _queue_position(job.id)})
 
 
 @app.post("/api/edit/async")
 async def api_edit_async(req: EditRequest):
+    # FLUX.2-klein always supports i2i; this guard is just defensive.
+    if not SUPPORTS_EDIT:
+        return JSONResponse({"error": f"engine '{ENGINE}' does not support editing"}, status_code=400)
     job = Job("edit", req.model_dump())
     if not await _enqueue(job):
         return JSONResponse({"error": "queue full"}, status_code=503)
-    return JSONResponse({
-        "job_id": job.id,
-        "status": "queued",
-        "queue_position": _queue_position(job.id),
-    })
+    return JSONResponse({"job_id": job.id, "status": "queued", "queue_position": _queue_position(job.id)})
 
 
-@app.post("/api/chat")
-async def api_chat(req: ChatRequest):
-    """Synchronous text chat. With ref_image: visual understanding (image + question -> text).
-    Without: pure text-to-text via the underlying language model."""
-    job = Job("chat", req.model_dump())
-    if not await _enqueue(job):
-        return JSONResponse({"error": "queue full"}, status_code=503)
-    await _wait_for_job(job)
-    if job.status == "failed":
-        return JSONResponse({"error": job.error}, status_code=500)
-    return JSONResponse({"job_id": job.id, **(job.result or {})})
+@app.post("/api/upscale")
+async def api_upscale(req: UpscaleRequest):
+    """AI super-resolution (4x model), tiled. Synchronous — upscale is fast.
+    Used to produce a cleaner, higher-res image to vectorise."""
+    try:
+        img = _b64_to_pil(req.image)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"bad image: {e}"}, status_code=400)
+    max_dim = int(req.max_dim) if req.max_dim is not None else UPSCALE_MAX_DIM
+    loop = asyncio.get_event_loop()
+    res = await loop.run_in_executor(None, _upscale_pil, img, max_dim)
+    if res is None:
+        return JSONResponse({"error": _upscaler_error or "upscaler unavailable"}, status_code=503)
+    return JSONResponse({"image": _pil_to_b64(res), "width": res.width, "height": res.height})
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1048,8 +653,13 @@ async def api_job_status(job_id: str):
 async def api_health():
     return {
         "status": "ok",
-        "model_loaded": _pipeline is not None,
-        "model_error": _pipeline_error,
+        "model_loaded": _pipe is not None,
+        "model_error": _pipe_error,
+        "engine": ENGINE,
+        "supports_edit": SUPPORTS_EDIT,
+        "supports_upscale": True,
+        "max_side": MAX_SIDE,
+        "steps": DEFAULT_STEPS,
         "queue": {
             "queued": sum(1 for j in _jobs.values() if j.status == "queued"),
             "processing": sum(1 for j in _jobs.values() if j.status == "processing"),
@@ -1061,25 +671,18 @@ async def api_health():
 @app.get("/status")
 async def api_status():
     return {
-        "service": "5cd-single AI Worker",
+        "service": "5cd image worker (FLUX.2-klein-4B)",
+        "engine": ENGINE,
+        "supports_edit": SUPPORTS_EDIT,
         "device": DEVICE,
         "dtype": DTYPE_NAME,
-        "model_loaded": _pipeline is not None,
-        "model_error": _pipeline_error,
-        "gguf_present": os.path.isfile(os.path.join(MODELS_DIR, GGUF_FILE)),
+        "base_repo": BASE,
+        "gguf_file": GGUF_FILE,
+        "text_encoder_4bit": TEXT_ENCODER_4BIT,
+        "max_side": MAX_SIDE,
+        "model_loaded": _pipe is not None,
+        "model_error": _pipe_error,
         "models_dir": os.path.abspath(MODELS_DIR),
-        "defaults": {
-            "steps": DEFAULT_STEPS,
-            "cfg_scale": DEFAULT_CFG_SCALE,
-            "width": DEFAULT_WIDTH,
-            "height": DEFAULT_HEIGHT,
-            "patch_factor": PATCH_FACTOR,
-            "think": DEFAULT_THINK,
-            "cfg_norm": DEFAULT_CFG_NORM,
-        },
-        "queue": {
-            "queued": sum(1 for j in _jobs.values() if j.status == "queued"),
-            "processing": sum(1 for j in _jobs.values() if j.status == "processing"),
-            "max": MAX_QUEUE,
-        },
+        "defaults": {"steps": DEFAULT_STEPS, "guidance_scale": DEFAULT_GUIDANCE,
+                     "width": DEFAULT_WIDTH, "height": DEFAULT_HEIGHT},
     }

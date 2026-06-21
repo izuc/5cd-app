@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# One-shot installer for the 5cd AI worker (SenseNova-U1 GGUF + Infographic 8-step LoRA).
-# Linux/macOS parity for install.ps1. Safe to re-run.
+# One-command installer for the 5cd AI image worker (FLUX.2-klein-4B) — Linux/macOS.
+# Single model for everything: text-to-image, image-to-image (edits) and AI upscaling,
+# quantised to fit one <24GB card (GGUF transformer + 4-bit text encoder).
 #
-# Usage:
-#   ./install.sh                 # full install (env + ~17 GB models)
+#   ./install.sh                 # full install (env + ~13GB weights)
 #   ./install.sh --skip-models   # env only; run `python download_model.py` later
-#   ./install.sh --skip-torch    # don't (re)install CUDA torch
-#   ./install.sh --recreate      # rebuild .venv from scratch
+#   ./install.sh --skip-torch | --recreate
 #   TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 ./install.sh
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -21,107 +20,80 @@ for arg in "$@"; do
   esac
 done
 
-# cu128 wheels for RTX 50-series / Blackwell. Override via TORCH_INDEX_URL.
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 TORCH_SPEC=(torch==2.11.0 torchvision==0.26.0)
-SENSENOVA_REPO="https://github.com/OpenSenseNova/SenseNova-U1.git"
 VENV_PY="./.venv/bin/python"
+REPO_URL="https://github.com/black-forest-labs/flux2.git"
 
 step() { printf '\n=== %s ===\n' "$1"; }
 ok()   { printf '  [ok] %s\n' "$1"; }
+note() { printf '  [!]  %s\n' "$1"; }
 
 echo "========================================================"
-echo "  5cd AI worker installer (SenseNova-U1)"
+echo "  5cd AI image worker installer (FLUX.2-klein-4B)"
 echo "========================================================"
 
-# ---- 1. Python 3.11 ----
 step "Locating Python 3.11"
 PY311=""
 for c in python3.11 python3 python; do
-  if command -v "$c" >/dev/null 2>&1 && "$c" --version 2>&1 | grep -q "3\.11\."; then
-    PY311="$c"; break
-  fi
+  if command -v "$c" >/dev/null 2>&1 && "$c" --version 2>&1 | grep -q "3\.11\."; then PY311="$c"; break; fi
 done
-[ -n "$PY311" ] || { echo "Python 3.11 not found (SenseNova-U1 needs >=3.11,<3.12)." >&2; exit 1; }
+[ -n "$PY311" ] || { echo "Python 3.11 not found." >&2; exit 1; }
 ok "Using $($PY311 --version) ($PY311)"
 
-# ---- 2. venv ----
 step "Virtual environment (.venv)"
 [ "$RECREATE" = 1 ] && [ -d .venv ] && { echo "  removing .venv (--recreate)"; rm -rf .venv; }
 [ -x "$VENV_PY" ] || { "$PY311" -m venv .venv; ok "created .venv"; }
 "$VENV_PY" -m pip install --upgrade pip --quiet
 ok "pip up to date"
 
-# ---- 3. torch ----
-if [ "$SKIP_TORCH" = 1 ]; then
-  step "PyTorch — skipped (--skip-torch)"
-else
+if [ "$SKIP_TORCH" = 1 ]; then step "PyTorch - skipped (--skip-torch)"; else
   step "Installing CUDA PyTorch from $TORCH_INDEX_URL"
-  "$VENV_PY" -m pip install "${TORCH_SPEC[@]}" --index-url "$TORCH_INDEX_URL"
-  ok "torch + torchvision installed"
+  "$VENV_PY" -m pip install "${TORCH_SPEC[@]}" --index-url "$TORCH_INDEX_URL"; ok "torch installed"
 fi
 
-# ---- 4. deps ----
 step "Installing Python dependencies (requirements.txt)"
 "$VENV_PY" -m pip install -r requirements.txt
-ok "dependencies installed"
+ok "dependencies installed (diffusers main + bitsandbytes + gguf + spandrel)"
 
-# ---- 5. SenseNova-U1 (editable, --no-deps so its torch==2.8.0 pin doesn't clobber cu128) ----
-step "SenseNova-U1 package (custom NEO-Unify AutoModel)"
-if [ ! -f SenseNova-U1/pyproject.toml ]; then
-  command -v git >/dev/null 2>&1 || { echo "git not found — needed to clone $SENSENOVA_REPO" >&2; exit 1; }
-  git clone --depth 1 "$SENSENOVA_REPO" SenseNova-U1
-fi
-"$VENV_PY" -m pip install -e ./SenseNova-U1 --no-deps
-ok "sensenova_u1 installed (editable, --no-deps)"
-
-# ---- 6. .env ----
 step "Environment file (.env)"
 [ -f .env ] || { cp .env.example .env; ok "created .env from .env.example"; }
 [ -f .env ] && ok ".env ready"
 
-# ---- 7. models ----
-if [ "$SKIP_MODELS" = 1 ]; then
-  step "Model download — skipped (--skip-models)"
-  echo "  Run '$VENV_PY download_model.py' before starting the worker."
-else
-  step "Downloading model + LoRA + tokenizer/config (~17 GB, one-time)"
-  "$VENV_PY" download_model.py
-  ok "model files downloaded"
+step "Cloning FLUX.2 reference repo (flux2)"
+if [ -d "flux2/.git" ]; then ok "flux2 already cloned"
+elif ! command -v git >/dev/null 2>&1; then note "git not found - skipping (reference only)."
+else git clone --depth 1 "$REPO_URL" flux2 && ok "cloned $REPO_URL" || note "clone failed (reference only)."
 fi
 
-# ---- 8. verify ----
-# -X utf8: importing sensenova_u1 triggers transformers' auto_docstring, which
-# prints emoji warnings; UTF-8 mode keeps the verify subprocess from choking.
+if [ "$SKIP_MODELS" = 1 ]; then
+  step "Model download - skipped (--skip-models)"
+  echo "  Download later with: $VENV_PY download_model.py"
+else
+  step "Downloading weights (GGUF transformer + base components + upscaler, ~13GB)"
+  "$VENV_PY" download_model.py
+  ok "weights downloaded"
+fi
+
 step "Verifying install"
-"$VENV_PY" -X utf8 - "$PWD" <<'PYEOF'
+"$VENV_PY" -X utf8 - <<'PYEOF'
 import warnings
 warnings.filterwarnings("ignore")
-import importlib, os, sys, torch
-print('torch', torch.__version__, '| cuda build', torch.version.cuda, '| cuda available', torch.cuda.is_available())
+import importlib.util, sys, torch
+print('torch', torch.__version__, '| cuda available', torch.cuda.is_available())
 if torch.cuda.is_available():
     print('gpu', torch.cuda.get_device_name(0))
-importlib.import_module('sensenova_u1')
-print('sensenova_u1 import OK')
-base = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
-from dotenv import load_dotenv; load_dotenv(os.path.join(base, '.env'))
-md = os.getenv('MODELS_DIR', './models')
-if not os.path.isabs(md):
-    md = os.path.join(base, md)
-missing = False
-for key in ('GGUF_FILE', 'LORA_FILE'):
-    fn = os.getenv(key, '')
-    p = os.path.join(md, fn) if fn else ''
-    ok = bool(fn) and os.path.exists(p)
-    print(f'{key}={fn or "(unset)"} ->', 'present' if ok else ('MISSING' if fn else 'skipped'))
-    if fn and not ok:
-        missing = True
-sys.exit(2 if missing else 0)
+import diffusers
+ok = hasattr(diffusers, 'Flux2KleinPipeline')
+print('diffusers', diffusers.__version__, '| Flux2KleinPipeline', 'OK' if ok else 'MISSING (need diffusers main)')
+for m in ('gguf', 'bitsandbytes', 'spandrel'):
+    print(m, 'present' if importlib.util.find_spec(m) else 'MISSING')
+sys.exit(0 if ok else 3)
 PYEOF
 
 echo
 echo "========================================================"
 echo "  Install complete."
 echo "========================================================"
-echo "Start the worker with:  ./.venv/bin/python run.py"
-echo "Health check at:        http://127.0.0.1:8090/api/health"
+echo "Start it with:  ./.venv/bin/python run.py"
+echo "It serves t2i + i2i + upscale on http://127.0.0.1:8090"

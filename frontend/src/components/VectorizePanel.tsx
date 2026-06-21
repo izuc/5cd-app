@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from './Icon';
 import { SvgVectorEditor } from './SvgVectorEditor';
+import { api } from '../api/client';
 import { useVectorizer } from '../vectorize/useVectorizer';
 import type { ConversionSettings, QualityLevel } from '../vectorize/types';
 
@@ -28,53 +29,82 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
   const [colorCount, setColorCount] = useState(12); // <10 tends to drop fine detail / text
   const [smoothness, setSmoothness] = useState(5); // higher = smoother curves (below ~3 has little effect)
   const [removeBackground, setRemoveBackground] = useState(false);
+  const [aiUpscale, setAiUpscale] = useState(false);
+  const [canUpscale, setCanUpscale] = useState(false);
   const [loadingImg, setLoadingImg] = useState(false);
+  const [loadMsg, setLoadMsg] = useState('Loading image…');
   const [err, setErr] = useState('');
   const [working, setWorking] = useState('');   // current (edited) SVG
   const [history, setHistory] = useState<string[]>([]);
-  const imageDataRef = useRef<ImageData | null>(null);
+  const cacheRef = useRef<{ upscaled: boolean; data: ImageData } | null>(null);
 
-  const loadImageData = useCallback(
-    () =>
-      new Promise<ImageData>((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => {
-          let w = img.naturalWidth, h = img.naturalHeight;
-          const m = Math.max(w, h);
-          if (m > MAX_SOURCE) { const s = MAX_SOURCE / m; w = Math.round(w * s); h = Math.round(h * s); }
-          const canvas = document.createElement('canvas');
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          if (!ctx) return reject(new Error('Canvas not available.'));
-          ctx.drawImage(img, 0, 0, w, h);
-          try { resolve(ctx.getImageData(0, 0, w, h)); } catch { reject(new Error('Could not read image pixels.')); }
-        };
-        img.onerror = () => reject(new Error('Could not load the image.'));
-        img.src = imageUrl;
-      }),
-    [imageUrl]
-  );
+  // Draw the source image onto a canvas, optionally capped to maxDim (long side).
+  const drawSource = useCallback((maxDim: number) => new Promise<HTMLCanvasElement>((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      let w = img.naturalWidth, h = img.naturalHeight;
+      const m = Math.max(w, h);
+      if (maxDim && m > maxDim) { const s = maxDim / m; w = Math.round(w * s); h = Math.round(h * s); }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return reject(new Error('Canvas not available.'));
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(c);
+    };
+    img.onerror = () => reject(new Error('Could not load the image.'));
+    img.src = imageUrl;
+  }), [imageUrl]);
+
+  const canvasToImageData = (c: HTMLCanvasElement) => c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, c.width, c.height);
+  const dataUrlToImageData = (url: string) => new Promise<ImageData>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return reject(new Error('Canvas not available.'));
+      ctx.drawImage(img, 0, 0);
+      resolve(ctx.getImageData(0, 0, c.width, c.height));
+    };
+    img.onerror = () => reject(new Error('Could not decode upscaled image.'));
+    img.src = url;
+  });
 
   const convert = useCallback(async () => {
     setErr('');
     try {
       setLoadingImg(true);
-      const data = imageDataRef.current || (await loadImageData());
-      imageDataRef.current = data;
+      let data: ImageData;
+      if (cacheRef.current && cacheRef.current.upscaled === aiUpscale) {
+        data = cacheRef.current.data;
+      } else if (aiUpscale) {
+        setLoadMsg('AI upscaling…');
+        const srcUrl = (await drawSource(MAX_SOURCE)).toDataURL('image/png');
+        const up = await api.upscale(srcUrl, 2048); // 4x model, capped to 2048
+        data = await dataUrlToImageData(up.image);
+        cacheRef.current = { upscaled: true, data };
+      } else {
+        setLoadMsg('Loading image…');
+        data = canvasToImageData(await drawSource(MAX_SOURCE));
+        cacheRef.current = { upscaled: false, data };
+      }
       setLoadingImg(false);
       const settings: ConversionSettings = {
         colorCount, smoothness, minArea: 20, removeBackground,
         hasTransparentSource: hasTransparency(data),
         selectedColors: new Set<number>(),
-        qualityLevel: quality,
+        // The AI-upscaled source is already high-res, so cap the engine's label
+        // upscale at 2x — full quality on a 2048 source would trace at ~6k (slow).
+        qualityLevel: aiUpscale && (quality === 'high' || quality === 'detailed') ? 'balanced' : quality,
       };
       processImage(data, settings);
     } catch (e: any) { setLoadingImg(false); setErr(e?.message || 'Vectorise failed.'); }
-  }, [colorCount, smoothness, removeBackground, quality, loadImageData, processImage]);
+  }, [aiUpscale, colorCount, smoothness, removeBackground, quality, drawSource, processImage]);
 
   // Auto-run once on open.
   useEffect(() => { convert(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  // Show the AI-upscale toggle only if the worker supports it.
+  useEffect(() => { api.aiConfig().then((c) => setCanUpscale(!!c.supports_upscale)).catch(() => {}); }, []);
 
   // A fresh conversion replaces the working copy and clears edit history.
   useEffect(() => { if (svgContent) { setWorking(svgContent); setHistory([]); } }, [svgContent]);
@@ -141,6 +171,12 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
             <input type="checkbox" checked={removeBackground} onChange={(e) => setRemoveBackground(e.target.checked)} disabled={busy} className="h-4 w-4 accent-primary" />
             <span className="text-xs">Auto-remove background</span>
           </label>
+          {canUpscale && (
+            <label className="flex items-center gap-1.5 cursor-pointer" title="Super-resolve the image with AI before tracing (cleaner, finer detail)">
+              <input type="checkbox" checked={aiUpscale} onChange={(e) => setAiUpscale(e.target.checked)} disabled={busy} className="h-4 w-4 accent-primary" />
+              <span className="text-xs">AI upscale</span>
+            </label>
+          )}
           <button onClick={convert} disabled={busy}
             className="ml-auto flex items-center gap-1.5 bg-surface-container-high px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-surface-container-highest disabled:opacity-50">
             <Icon name="autorenew" className="text-sm" /> {busy ? 'Converting…' : 'Re-trace'}
@@ -160,7 +196,7 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
                 <div className="h-2 bg-surface-container-high rounded-full overflow-hidden">
                   <div className="h-full bg-primary transition-all" style={{ width: `${Math.round(progress.progress * 100)}%` }} />
                 </div>
-                <p className="text-xs text-on-surface-variant">{loadingImg ? 'Loading image…' : progress.message}</p>
+                <p className="text-xs text-on-surface-variant">{loadingImg ? loadMsg : progress.message}</p>
               </div>
             </div>
           ) : working ? (
