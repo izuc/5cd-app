@@ -36,3 +36,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# temp vectoriser test harness (dev only)
+frontend/vectest_harness.*
