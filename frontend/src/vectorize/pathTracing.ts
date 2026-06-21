@@ -846,7 +846,7 @@ export function generateSvg(
   height: number,
   removeBackground: boolean = false,    // Filter out detected background shapes
   pathScale: number = 1, // Scale factor to divide path coordinates by
-  hasTransparentSource: boolean = false // Source has transparency - don't add bg rect
+  _hasTransparentSource: boolean = false // (kept for call-site compatibility; bg is now always a traced shape)
 ): string {
   // Group shapes by color for compound paths
   const colorGroups = groupShapesByColor(shapes);
@@ -889,12 +889,12 @@ export function generateSvg(
   svg += `    </style>\n`;
   svg += `  </defs>\n`;
 
-  // Add background rect unless:
-  // - removeBackground is true (user wants to filter background shapes)
-  // - hasTransparentSource is true (source image already has transparency)
-  if (!removeBackground && !hasTransparentSource) {
-    svg += `  <rect id="background" width="100%" height="100%" fill="${dominantHex}"/>\n`;
-  }
+  // NOTE: we deliberately do NOT emit a standalone <rect id="background"> here.
+  // The background is already traced as a real shape (the dominant full-canvas
+  // path), so a separate rect was redundant AND left an orphan square behind when
+  // the user deleted the background colour in the editor (it isn't one of the
+  // traced shapes). The traced background shape is the backdrop and is editable
+  // like everything else.
 
   // Main content group
   svg += `  <g id="content">\n`;
