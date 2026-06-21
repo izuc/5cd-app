@@ -207,7 +207,7 @@ export function CreateDesign() {
         <p className="text-on-surface-variant text-base sm:text-lg max-w-xl mx-auto">
           {mode === 'upload'
             ? 'Upload an image to refine and edit with prompts.'
-            : `We'll generate ${numConcepts} ${numConcepts === 1 ? 'design' : 'concepts'} from your prompt — you can refine after.`}
+            : "We'll generate concepts from your prompt — you can refine after."}
         </p>
       </header>
 
