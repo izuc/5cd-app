@@ -11,7 +11,9 @@ CREATE TABLE `users` (
   `email` VARCHAR(255) NOT NULL UNIQUE,
   `password_hash` VARCHAR(255) NOT NULL,
   `display_name` VARCHAR(100) NOT NULL DEFAULT '',
-  `credits` INT NOT NULL DEFAULT 5,
+  `credits` INT NOT NULL DEFAULT 0,                 -- purchased credits (persist)
+  `free_credits` INT NOT NULL DEFAULT 5,            -- today's free allowance (resets daily, no rollover)
+  `free_credits_reset` DATE NULL,                   -- date free_credits was last reset
   `plan` ENUM('free','pro') NOT NULL DEFAULT 'free',
   `theme_color` VARCHAR(7) NOT NULL DEFAULT '#059669',
   `token_version` INT NOT NULL DEFAULT 0,

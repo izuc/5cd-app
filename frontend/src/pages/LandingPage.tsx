@@ -105,7 +105,7 @@ export function LandingPage() {
               Ready to design?
             </h2>
             <p className="text-surface/60 text-lg sm:text-xl mb-12">
-              Sign up free, get five credits, and start generating.
+              Sign up free — 5 free credits every day to start generating.
             </p>
             <Link to="/register" className="inline-block bg-primary-container text-on-primary-container px-12 py-5 rounded-2xl font-headline font-black text-xl sm:text-2xl hover:scale-105 active:scale-95 transition-all">
               Start Designing Free

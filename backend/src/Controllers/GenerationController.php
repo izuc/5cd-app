@@ -6,6 +6,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Config\Paths;
+use App\Services\Credits;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -57,6 +58,19 @@ class GenerationController
             $payload['ref_images'] = [$refB64];
             $payload['img_cfg_scale'] = 1.0;
         }
+
+        // Generation costs 1 credit per concept (drawn from the daily free allowance
+        // first, then purchased credits). Gate up-front; the actual charge happens on
+        // delivery in checkAndSaveJob() so only concepts that succeed are billed.
+        $needed = (int) $payload['num_concepts'];
+        if (!Credits::canAfford($db, (int) $userId, $needed)) {
+            return $this->json($response, [
+                'error' => true,
+                'code' => 'insufficient_credits',
+                'message' => "Not enough credits — $needed concept(s) needs $needed credit(s). Buy more or generate fewer.",
+            ], 402);
+        }
+
         $jobId = $this->aiPostAsync('/api/generate/async', $payload);
 
         // Only flip the project into "generating" if the worker actually accepted the
@@ -267,7 +281,7 @@ class GenerationController
     private function checkAndSaveJob(int $projectId): void
     {
         $db = Database::getConnection();
-        $stmt = $db->prepare('SELECT id, ai_job_id, status, config_json FROM projects WHERE id = ?');
+        $stmt = $db->prepare('SELECT id, user_id, ai_job_id, status, config_json FROM projects WHERE id = ?');
         $stmt->execute([$projectId]);
         $project = $stmt->fetch();
         if (!$project || empty($project['ai_job_id'])) {
@@ -379,6 +393,17 @@ class GenerationController
             $update = $db->prepare('UPDATE generations SET output_image_url = ? WHERE id = ?');
             $update->execute([$publicUrl, $genId]);
             $newIds[] = $genId;
+        }
+
+        // Bill generation: 1 credit per delivered concept (edits are free). Free
+        // allowance first, then purchased. allowPartial so a partial failure never
+        // overcharges; the up-front gate in generate() already ensured funds.
+        if ($kind === 'concept' && $newIds) {
+            try {
+                Credits::charge($db, (int) $project['user_id'], count($newIds), 'generate-concepts', $projectId, true);
+            } catch (\Throwable $e) {
+                error_log('[5cd] credit charge failed for project ' . $projectId . ': ' . $e->getMessage());
+            }
         }
 
         // For an edit job, auto-promote the new image to the chosen generation.

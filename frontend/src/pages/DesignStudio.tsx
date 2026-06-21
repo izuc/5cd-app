@@ -4,6 +4,7 @@ import { api, type Generation, type Project } from '../api/client';
 import { Icon } from '../components/Icon';
 import { VectorizePanel } from '../components/VectorizePanel';
 import { usePageTitle } from '../hooks/usePageTitle';
+import { useAuthStore } from '../store/authStore';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
@@ -16,6 +17,7 @@ export function DesignStudio() {
   const { projectId } = useParams<{ projectId: string }>();
   usePageTitle('Studio');
 
+  const setCredits = useAuthStore((s) => s.setCredits);
   const [project, setProject] = useState<Project | null>(null);
   const [generations, setGenerations] = useState<Generation[]>([]);
   const [chosen, setChosen] = useState<Generation | null>(null);
@@ -171,6 +173,8 @@ export function DesignStudio() {
         }
         // Stop polling once we have generations AND no active job.
         if (gens.length > 0 && !res.ai_job_id) {
+          // Generation finished and was billed — refresh the credit balance.
+          api.getBalance().then((b) => setCredits(b.balance)).catch(() => {});
           return false;
         }
         // Terminal failure: a job ran but finished with no result (e.g. the model was

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
+use App\Services\Credits;
 use Firebase\JWT\JWT;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -40,9 +41,10 @@ class AuthController
             $displayName = explode('@', $email)[0];
         }
 
+        // Purchased credits start at 0 — new users get the daily free allowance.
         $stmt = $db->prepare(
             'INSERT INTO users (email, password_hash, display_name, credits, plan, theme_color, created_at, updated_at)
-             VALUES (?, ?, ?, 5, ?, ?, NOW(), NOW())'
+             VALUES (?, ?, ?, 0, ?, ?, NOW(), NOW())'
         );
         $stmt->execute([$email, $hash, $displayName, 'free', '#059669']);
         $userId = (int) $db->lastInsertId();
@@ -50,7 +52,7 @@ class AuthController
         $token = $this->makeToken($userId, $email);
         $stmt = $db->prepare('SELECT id, email, display_name, credits, plan, theme_color, created_at FROM users WHERE id = ?');
         $stmt->execute([$userId]);
-        $user = $stmt->fetch();
+        $user = $this->withCredits($db, $stmt->fetch());
 
         return $this->json($response, ['token' => $token, 'user' => $user], 201);
     }
@@ -77,7 +79,7 @@ class AuthController
         $token = $this->makeToken((int) $user['id'], $user['email'], (int) $user['token_version']);
         unset($user['password_hash'], $user['token_version']);
 
-        return $this->json($response, ['token' => $token, 'user' => $user]);
+        return $this->json($response, ['token' => $token, 'user' => $this->withCredits($db, $user)]);
     }
 
     public function logout(Request $request, Response $response): Response
@@ -98,7 +100,17 @@ class AuthController
         if (!$user) {
             return $this->json($response, ['error' => true, 'message' => 'User not found'], 404);
         }
-        return $this->json($response, ['user' => $user]);
+        return $this->json($response, ['user' => $this->withCredits($db, $user)]);
+    }
+
+    /** Override `credits` with the live total (daily free + purchased) and add the breakdown. */
+    private function withCredits(\PDO $db, array $user): array
+    {
+        $b = Credits::balance($db, (int) $user['id']);
+        $user['credits'] = $b['total'];
+        $user['free_credits'] = $b['free'];
+        $user['paid_credits'] = $b['paid'];
+        return $user;
     }
 
     private function makeToken(int $userId, string $email, int $tokenVersion = 0): string

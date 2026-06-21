@@ -6,6 +6,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Config\Paths;
+use App\Services\Credits;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -38,7 +39,7 @@ class ExportController
         if (empty($row['chosen_generation_id'])) {
             return $this->json($response, ['error' => true, 'message' => 'No chosen design to export'], 400);
         }
-        if ($cost > 0 && (int) $row['credits'] < $cost) {
+        if ($cost > 0 && !Credits::canAfford($db, (int) $userId, $cost)) {
             return $this->json($response, ['error' => true, 'message' => 'Insufficient credits'], 402);
         }
 
@@ -105,21 +106,12 @@ class ExportController
         $db->beginTransaction();
         try {
             if ($cost > 0) {
-                $stmt = $db->prepare('SELECT credits FROM users WHERE id = ? FOR UPDATE');
-                $stmt->execute([$userId]);
-                $u = $stmt->fetch();
-                if (!$u || (int) $u['credits'] < $cost) {
+                $charged = Credits::charge($db, (int) $userId, $cost, 'export-' . $format, $projectId);
+                if ($charged < 0) {
                     $db->rollBack();
                     @unlink($destPath);
                     return $this->json($response, ['error' => true, 'message' => 'Insufficient credits'], 402);
                 }
-                $stmt = $db->prepare('UPDATE users SET credits = credits - ? WHERE id = ?');
-                $stmt->execute([$cost, $userId]);
-                $stmt = $db->prepare(
-                    'INSERT INTO credit_transactions (user_id, amount, reason, project_id, created_at)
-                     VALUES (?, ?, ?, ?, NOW())'
-                );
-                $stmt->execute([$userId, -$cost, 'export-' . $format, $projectId]);
             }
 
             $stmt = $db->prepare(

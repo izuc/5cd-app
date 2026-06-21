@@ -33,7 +33,7 @@ export function Register() {
       <div className="w-full max-w-md space-y-8">
         <div className="text-center">
           <h1 className="font-headline text-4xl font-black tracking-tighter text-on-surface">Create your account</h1>
-          <p className="text-on-surface-variant mt-2">Get 5 free credits to start designing</p>
+          <p className="text-on-surface-variant mt-2">5 free credits every day to design with</p>
         </div>
         <form onSubmit={handleSubmit} className="bg-surface-container-lowest p-8 rounded-3xl shadow-[0_20px_40px_rgba(30,30,30,0.06)] space-y-6">
           {error && (
@@ -65,7 +65,7 @@ export function Register() {
             {!loading && <Icon name="auto_awesome" />}
           </button>
           <p className="text-center text-xs text-on-surface-variant">
-            You'll receive <span className="font-bold text-primary">5 free credits</span> on signup
+            You'll get <span className="font-bold text-primary">5 free credits every day</span> — 1 credit per concept
           </p>
         </form>
         <p className="text-center text-on-surface-variant">

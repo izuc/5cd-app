@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
+use App\Services\Credits;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -20,10 +21,8 @@ class CreditController
     {
         $userId = $request->getAttribute('userId');
         $db = Database::getConnection();
-        $stmt = $db->prepare('SELECT credits FROM users WHERE id = ?');
-        $stmt->execute([$userId]);
-        $row = $stmt->fetch();
-        return $this->json($response, ['balance' => (int) ($row['credits'] ?? 0)]);
+        $b = Credits::balance($db, (int) $userId);
+        return $this->json($response, ['balance' => $b['total'], 'free' => $b['free'], 'paid' => $b['paid']]);
     }
 
     public function history(Request $request, Response $response): Response
@@ -57,10 +56,8 @@ class CreditController
                  VALUES (?, ?, ?, ?, NOW())'
             );
             $stmt->execute([$userId, $bundle['credits'], 'purchase-' . $bundleId, 'dev-' . uniqid()]);
-            $stmt = $db->prepare('SELECT credits FROM users WHERE id = ?');
-            $stmt->execute([$userId]);
-            $balance = (int) $stmt->fetch()['credits'];
             $db->commit();
+            $balance = Credits::balance($db, (int) $userId)['total'];
             return $this->json($response, ['success' => true, 'credits' => $balance]);
         } catch (\Throwable $e) {
             $db->rollBack();

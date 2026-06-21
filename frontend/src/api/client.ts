@@ -105,7 +105,7 @@ export const api = {
     request<{ export: any }>(`/projects/${projectId}/export`, { method: 'POST', body: JSON.stringify({ format }) }),
   listExports: () => request<{ exports: any[] }>('/exports'),
 
-  getBalance: () => request<{ balance: number }>('/credits/balance'),
+  getBalance: () => request<{ balance: number; free?: number; paid?: number }>('/credits/balance'),
   getCreditHistory: () => request<{ transactions: any[] }>('/credits/history'),
   purchaseCredits: (bundle: string) =>
     request<{ success: boolean; credits: number }>('/credits/purchase', { method: 'POST', body: JSON.stringify({ bundle }) }),

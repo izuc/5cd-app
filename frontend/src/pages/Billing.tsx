@@ -51,11 +51,12 @@ export function Billing() {
       <header className="flex items-end justify-between flex-wrap gap-4">
         <div>
           <h1 className="font-headline text-3xl sm:text-4xl font-black tracking-tighter">Credits</h1>
-          <p className="text-on-surface-variant mt-1">Buy credits to export your designs — generating is free.</p>
+          <p className="text-on-surface-variant mt-1">5 free credits every day. Each design concept costs 1 credit; buy more for higher volume.</p>
         </div>
         <div className="bg-surface-container-lowest rounded-2xl p-5 shadow-sm">
-          <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Current Balance</p>
+          <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Balance</p>
           <p className="font-headline text-3xl font-extrabold mt-1">{user?.credits ?? 0}</p>
+          <p className="text-[11px] text-on-surface-variant mt-0.5">includes 5 free / day</p>
         </div>
       </header>
 
