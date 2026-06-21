@@ -339,8 +339,9 @@ def _expand_prompt(prompt: str, design_type: Optional[str]) -> str:
         if "</think>" in gen:  # belt-and-braces if a think block slips through
             gen = gen.split("</think>")[-1]
         gen = gen.strip().strip('"').strip()
-        # Guard against a model that ignores the instruction / returns junk.
-        return gen if len(gen) >= len(prompt) else prompt
+        # Guard only against an empty/near-empty result (model echoed nothing); a valid
+        # expansion can occasionally be about the same length as a longer input prompt.
+        return gen if len(gen) >= 8 else prompt
     except Exception as e:  # noqa: BLE001
         print(f"[expand] failed: {type(e).__name__}: {e}")
         return prompt
@@ -603,8 +604,8 @@ async def _periodic_cleanup() -> None:
         await asyncio.sleep(60)
         try:
             _cleanup_jobs()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[cleanup] failed: {e}")
 
 
 # ---------------------------------------------------------------------------
