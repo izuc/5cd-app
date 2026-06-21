@@ -316,7 +316,7 @@ export function CreateDesign() {
           <div className="space-y-2">
             <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Concepts</label>
             <div className="flex gap-1.5">
-              {[1, 2, 3, 4].map((n) => (
+              {[1, 2, 3, 4, 5].map((n) => (
                 <button key={n} type="button" onClick={() => setNumConcepts(n)}
                   className={`flex-1 h-12 rounded-xl font-headline font-bold text-sm transition-all ${
                     numConcepts === n
