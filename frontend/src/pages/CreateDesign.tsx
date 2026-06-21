@@ -339,7 +339,7 @@ export function CreateDesign() {
                 Unique concepts <Icon name="shuffle" className="text-sm text-primary" />
               </span>
               <p className="text-xs text-on-surface-variant mt-0.5 break-words">
-                Rewrite the prompt for each concept (AI) so they vary in style &amp; composition, not just seed. A little slower.
+                Rewrite the prompt for each concept (AI) so they vary in style &amp; composition
               </p>
             </div>
           </label>
