@@ -26,7 +26,7 @@ function hasTransparency(d: ImageData): boolean {
 export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string; title: string; onClose: () => void }) {
   const { svgContent, progress, processImage } = useVectorizer();
   const [quality, setQuality] = useState<QualityLevel>('high');
-  const [colorCount, setColorCount] = useState(12); // <10 tends to drop fine detail / text
+  const [colorCount, setColorCount] = useState(16); // detail-rich logos lose low-contrast features (text/icons) below ~16; flat logos collapse extras so it's safe
   const [smoothness, setSmoothness] = useState(5); // higher = smoother curves (below ~3 has little effect)
   const [removeBackground, setRemoveBackground] = useState(false);
   const [aiUpscale, setAiUpscale] = useState(false);
