@@ -27,6 +27,13 @@
   color: var(--color-on-primary-container);
 }
 
+html {
+  /* Always reserve the vertical scrollbar's space so the content width stays
+     constant whether or not the page is tall enough to scroll (e.g. when an
+     optional section like "Unique concepts" appears and adds height). */
+  scrollbar-gutter: stable;
+}
+
 body {
   font-family: 'Inter', sans-serif;
   background-color: #f9f6f5;
