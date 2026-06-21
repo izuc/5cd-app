@@ -333,12 +333,12 @@ export function CreateDesign() {
         {numConcepts > 1 && (
           <label className="flex items-start gap-3 px-1 cursor-pointer">
             <input type="checkbox" checked={varyConcepts} onChange={(e) => setVaryConcepts(e.target.checked)}
-              disabled={loading} className="mt-0.5 h-4 w-4 accent-primary cursor-pointer" />
+              disabled={loading} className="mt-0.5 h-4 w-4 accent-primary cursor-pointer flex-shrink-0" />
             <div className="flex-1 min-w-0">
-              <span className="font-headline font-bold text-sm text-on-surface flex items-center gap-1.5">
+              <span className="font-headline font-bold text-sm text-on-surface inline-flex items-center gap-1.5">
                 Unique concepts <Icon name="shuffle" className="text-sm text-primary" />
               </span>
-              <p className="text-xs text-on-surface-variant mt-0.5">
+              <p className="text-xs text-on-surface-variant mt-0.5 break-words">
                 Rewrite the prompt for each concept (AI) so they vary in style &amp; composition, not just seed. A little slower.
               </p>
             </div>
