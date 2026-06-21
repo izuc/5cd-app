@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type Generation, type Project } from '../api/client';
 import { Icon } from '../components/Icon';
+import { VectorizePanel } from '../components/VectorizePanel';
 import { usePageTitle } from '../hooks/usePageTitle';
 
 interface ChatMsg {
@@ -25,6 +26,7 @@ export function DesignStudio() {
   const [progress, setProgress] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [showVectorize, setShowVectorize] = useState(false);
   const initialKickRef = useRef(false);
   const autoChosenRef = useRef(false);
   const jobSeenRef = useRef(false);
@@ -339,6 +341,13 @@ export function DesignStudio() {
             title="Regenerate (replaces current concepts)">
             <Icon name="autorenew" className="text-base" /> Regenerate
           </button>
+          <button onClick={() => setShowVectorize(true)} disabled={!chosen}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+              chosen ? 'bg-surface-container-high hover:bg-surface-container-highest' : 'bg-surface-container-high text-on-surface-variant opacity-50 cursor-not-allowed'
+            }`}
+            title="Convert the selected design to a scalable SVG">
+            <Icon name="polyline" className="text-base" /> Vectorise
+          </button>
           <Link to={`/export/${project.id}`}
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
               chosen ? 'bg-primary-container text-on-primary-container hover:scale-105' : 'bg-surface-container-high text-on-surface-variant pointer-events-none opacity-50'
@@ -347,6 +356,14 @@ export function DesignStudio() {
           </Link>
         </div>
       </div>
+
+      {showVectorize && chosen && (
+        <VectorizePanel
+          imageUrl={chosen.output_image_url + '?t=' + chosen.id}
+          title={project.title}
+          onClose={() => setShowVectorize(false)}
+        />
+      )}
 
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Left: image / concept picker */}

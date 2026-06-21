@@ -2,6 +2,7 @@
 **/node_modules/
 **/dist/
 **/build/
+**/*.tsbuildinfo
 
 # Python
 **/__pycache__/
@@ -14,6 +15,11 @@ ai-service/models/*
 !ai-service/models/.gitkeep
 ai-service/SenseNova-U1/
 ai-service/smoke_out.png
+alt-engine-service/models/*
+!alt-engine-service/models/.gitkeep
+# Associated source repos cloned by the alt-engine installer (reference only)
+alt-engine-service/flux2/
+alt-engine-service/ideogram4/
 
 # PHP
 backend/vendor/

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { Icon } from '../components/Icon';
@@ -68,17 +68,18 @@ const TYPE_OPTIONS: TypeOption[] = [
   },
 ];
 
-// Trained resolution buckets from the upstream model. Generating at these
-// sizes produces sharp text and faithful composition. Going below the
-// trained size — especially for designs containing typography — will
-// scribble the letter-forms.
+// Resolution buckets. SenseNova/Ideogram are tuned for the larger (2048) sizes;
+// FLUX.2-klein for ~1MP (1024). The Create page filters this list to the active
+// engine's cap (from /api/ai-config) so you can't pick a size the model dislikes.
 const SIZE_OPTIONS = [
   { value: '2048x2048', label: 'Square 1:1 · 2048 (best)', w: 2048, h: 2048 },
   { value: '2368x1760', label: 'Landscape 4:3 · 2368',     w: 2368, h: 1760 },
   { value: '1760x2368', label: 'Portrait 3:4 · 2368',      w: 1760, h: 2368 },
   { value: '2720x1536', label: 'Wide 16:9 · 2720',         w: 2720, h: 1536 },
   { value: '1536x2720', label: 'Tall 9:16 · 2720',         w: 1536, h: 2720 },
-  { value: '1024x1024', label: 'Square 1:1 · 1024 (preview, slower text)', w: 1024, h: 1024 },
+  { value: '1024x1024', label: 'Square 1:1 · 1024',        w: 1024, h: 1024 },
+  { value: '1024x768',  label: 'Landscape 4:3 · 1024',     w: 1024, h: 768 },
+  { value: '768x1024',  label: 'Portrait 3:4 · 1024',      w: 768,  h: 1024 },
 ];
 
 const STEPS = 8; // Infographic + 8-step distill LoRA → fast 8-step sampling.
@@ -92,6 +93,9 @@ export function CreateDesign() {
   const [type, setType] = useState(initialType);
   const [description, setDescription] = useState('');
   const [size, setSize] = useState('2048x2048'); // default to the "best" trained resolution
+  const [maxSide, setMaxSide] = useState(2048);  // active engine's resolution cap (from /api/ai-config)
+  const [steps, setSteps] = useState(STEPS);     // active engine's step count
+  const [engineLabel, setEngineLabel] = useState('');
   const [numConcepts, setNumConcepts] = useState(1);
   const [enhance, setEnhance] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -99,6 +103,19 @@ export function CreateDesign() {
   const [mode, setMode] = useState<'describe' | 'upload'>('describe');
   const [upload, setUpload] = useState<{ name: string; dataUrl: string } | null>(null);
   const [reference, setReference] = useState<{ name: string; dataUrl: string } | null>(null);
+
+  // Adapt the size selector + steps to whichever t2i engine is active (SenseNova /
+  // FLUX / Ideogram). Falls back silently to the SenseNova defaults if unavailable.
+  useEffect(() => {
+    api.aiConfig().then((cfg) => {
+      setMaxSide(cfg.max_side);
+      setSteps(cfg.steps);
+      setEngineLabel(cfg.label);
+      const fits = SIZE_OPTIONS.filter((s) => Math.max(s.w, s.h) <= cfg.max_side);
+      const pref = fits.find((s) => s.value === cfg.default_size) || fits[0];
+      if (pref) setSize(pref.value);
+    }).catch(() => { /* keep SenseNova defaults */ });
+  }, []);
 
   // Read an image, downscale to the model's 2048 sweet spot client-side (keeps the
   // payload well under the server POST limit + fast), flatten transparency, store it.
@@ -127,7 +144,8 @@ export function CreateDesign() {
   };
   const onPickFile = (file: File | undefined | null) => readImage(file, setUpload);
 
-  const sizePreset = SIZE_OPTIONS.find((s) => s.value === size) || SIZE_OPTIONS[0];
+  const availableSizes = SIZE_OPTIONS.filter((s) => Math.max(s.w, s.h) <= maxSide);
+  const sizePreset = availableSizes.find((s) => s.value === size) || availableSizes[0] || SIZE_OPTIONS[0];
   const typeOption = TYPE_OPTIONS.find((t) => t.value === type) || TYPE_OPTIONS[0];
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -138,7 +156,7 @@ export function CreateDesign() {
       if (mode === 'upload') {
         if (!upload) { setError('Please choose an image to upload.'); setLoading(false); return; }
         const upTitle = upload.name.replace(/\.[^.]+$/, '').slice(0, 60) || 'Uploaded design';
-        const up = await api.createProject({ type, title: upTitle, config: { description: '', uploadImage: upload.dataUrl, steps: STEPS } });
+        const up = await api.createProject({ type, title: upTitle, config: { description: '', uploadImage: upload.dataUrl, steps } });
         navigate(`/studio/${up.project.id}`);
         return;
       }
@@ -151,7 +169,7 @@ export function CreateDesign() {
           size,
           numConcepts,
           enhance,
-          steps: STEPS,
+          steps,
           width: sizePreset.w,
           height: sizePreset.h,
           ...(reference ? { referenceImages: [reference.dataUrl] } : {}),
@@ -267,7 +285,7 @@ export function CreateDesign() {
             <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Size</label>
             <select value={size} onChange={(e) => setSize(e.target.value)}
               className="w-full bg-surface-container-lowest border-2 border-surface-container-high rounded-xl p-3 focus:ring-2 focus:ring-primary/40 focus:border-primary text-sm">
-              {SIZE_OPTIONS.map((s) => (
+              {availableSizes.map((s) => (
                 <option key={s.value} value={s.value}>{s.label}</option>
               ))}
             </select>
@@ -339,7 +357,7 @@ export function CreateDesign() {
 
         {mode === 'describe' && (
           <p className="text-center text-xs text-on-surface-variant">
-            Output will be {sizePreset.w} × {sizePreset.h}.
+            Output will be {sizePreset.w} × {sizePreset.h}{engineLabel ? ` · ${engineLabel}` : ''}.
           </p>
         )}
       </form>

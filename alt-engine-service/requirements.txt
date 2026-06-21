@@ -1,0 +1,27 @@
+# Web server
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-dotenv>=1.0
+python-multipart>=0.0.9
+pydantic>=2.6
+
+# Image / numerics
+Pillow>=10
+numpy>=1.26
+
+# Model loading. NOTE: torch/torchvision are installed separately from the CUDA
+# 12.8 wheel index by install.ps1 / install.sh (RTX 50-series / Blackwell need cu128).
+torch>=2.7
+# diffusers main: has both Flux2KleinPipeline (flux) and Ideogram4Pipeline (ideogram).
+diffusers @ git+https://github.com/huggingface/diffusers.git
+transformers>=4.57.1
+accelerate>=1.10
+safetensors>=0.4
+sentencepiece
+protobuf
+peft>=0.13
+# nf4 (Ideogram) weights are bitsandbytes 4-bit. Harmless for the flux engine.
+bitsandbytes>=0.45
+
+# HF hub for downloads
+huggingface-hub>=0.25

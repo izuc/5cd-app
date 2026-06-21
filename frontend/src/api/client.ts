@@ -76,6 +76,10 @@ export const api = {
   deleteProject: (id: number) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
 
   // -- Generation ----------------------------------------------------
+  // Active t2i engine + its UI policy (size cap, default size, steps) so the
+  // Create page can adapt the size selector to whichever model will run.
+  aiConfig: () =>
+    request<{ engine: string; label: string; enabled: boolean; max_side: number; default_size: string; steps: number; supports_edit: boolean }>('/ai-config'),
   generate: (projectId: number, opts: { prompt?: string; num_concepts?: number; width?: number; height?: number; steps?: number; enhance?: boolean } = {}) =>
     request<{ job_id: string; status: string }>(`/projects/${projectId}/generate`, { method: 'POST', body: JSON.stringify(opts) }),
   edit: (projectId: number, prompt: string, imageUrl?: string, opts: { steps?: number; cfg_scale?: number } = {}) =>

@@ -1,0 +1,188 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Icon } from './Icon';
+import { SvgVectorEditor } from './SvgVectorEditor';
+import { useVectorizer } from '../vectorize/useVectorizer';
+import type { ConversionSettings, QualityLevel } from '../vectorize/types';
+
+// The raster source is capped to this long side before tracing; the quality level
+// then upscales from here (fast 1x / balanced 2x / high 3x / detailed 4x) so even a
+// 1024px generation is traced at higher resolution for crisp curves and text.
+const MAX_SOURCE = 1024;
+
+const QUALITY: { value: QualityLevel; label: string }[] = [
+  { value: 'fast', label: 'Fast (1×)' },
+  { value: 'balanced', label: 'Balanced (2×)' },
+  { value: 'high', label: 'High (3×)' },
+  { value: 'detailed', label: 'Detailed (4×)' },
+];
+
+function hasTransparency(d: ImageData): boolean {
+  const data = d.data;
+  for (let i = 3; i < data.length; i += 4) if (data[i] < 255) return true;
+  return false;
+}
+
+export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string; title: string; onClose: () => void }) {
+  const { svgContent, progress, processImage } = useVectorizer();
+  const [quality, setQuality] = useState<QualityLevel>('high');
+  const [colorCount, setColorCount] = useState(12); // <10 tends to drop fine detail / text
+  const [smoothness, setSmoothness] = useState(5); // higher = smoother curves (below ~3 has little effect)
+  const [removeBackground, setRemoveBackground] = useState(false);
+  const [loadingImg, setLoadingImg] = useState(false);
+  const [err, setErr] = useState('');
+  const [working, setWorking] = useState('');   // current (edited) SVG
+  const [history, setHistory] = useState<string[]>([]);
+  const imageDataRef = useRef<ImageData | null>(null);
+
+  const loadImageData = useCallback(
+    () =>
+      new Promise<ImageData>((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          let w = img.naturalWidth, h = img.naturalHeight;
+          const m = Math.max(w, h);
+          if (m > MAX_SOURCE) { const s = MAX_SOURCE / m; w = Math.round(w * s); h = Math.round(h * s); }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) return reject(new Error('Canvas not available.'));
+          ctx.drawImage(img, 0, 0, w, h);
+          try { resolve(ctx.getImageData(0, 0, w, h)); } catch { reject(new Error('Could not read image pixels.')); }
+        };
+        img.onerror = () => reject(new Error('Could not load the image.'));
+        img.src = imageUrl;
+      }),
+    [imageUrl]
+  );
+
+  const convert = useCallback(async () => {
+    setErr('');
+    try {
+      setLoadingImg(true);
+      const data = imageDataRef.current || (await loadImageData());
+      imageDataRef.current = data;
+      setLoadingImg(false);
+      const settings: ConversionSettings = {
+        colorCount, smoothness, minArea: 20, removeBackground,
+        hasTransparentSource: hasTransparency(data),
+        selectedColors: new Set<number>(),
+        qualityLevel: quality,
+      };
+      processImage(data, settings);
+    } catch (e: any) { setLoadingImg(false); setErr(e?.message || 'Vectorise failed.'); }
+  }, [colorCount, smoothness, removeBackground, quality, loadImageData, processImage]);
+
+  // Auto-run once on open.
+  useEffect(() => { convert(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  // A fresh conversion replaces the working copy and clears edit history.
+  useEffect(() => { if (svgContent) { setWorking(svgContent); setHistory([]); } }, [svgContent]);
+
+  const onEdit = useCallback((next: string) => {
+    setHistory((h) => [...h.slice(-49), working]);
+    setWorking(next);
+  }, [working]);
+
+  const undo = useCallback(() => {
+    setHistory((h) => {
+      if (!h.length) return h;
+      setWorking(h[h.length - 1]);
+      return h.slice(0, -1);
+    });
+  }, []);
+
+  const download = () => {
+    if (!working) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([working], { type: 'image/svg+xml' }));
+    a.download = (title || 'design').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 60) + '.svg';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const busy = loadingImg || (progress.stage !== 'idle' && progress.stage !== 'complete');
+  const sizeKB = working ? Math.max(1, Math.round(working.length / 1024)) : 0;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-2 sm:p-4" onClick={onClose}>
+      <div className="bg-surface rounded-2xl sm:rounded-3xl shadow-2xl w-full max-w-6xl h-[95vh] sm:h-[92vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-3.5 border-b border-outline-variant/10">
+          <div className="flex items-center gap-2">
+            <Icon name="polyline" className="text-primary" />
+            <h2 className="font-headline font-black text-lg">Vectorise &amp; edit</h2>
+          </div>
+          <button onClick={onClose} className="text-on-surface-variant hover:text-on-surface" aria-label="Close"><Icon name="close" /></button>
+        </div>
+
+        {/* Convert settings bar */}
+        <div className="flex flex-wrap items-center gap-3 px-6 py-2.5 border-b border-outline-variant/10 bg-surface-container-low text-sm">
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs text-on-surface-variant">Quality</span>
+            <select value={quality} onChange={(e) => setQuality(e.target.value as QualityLevel)} disabled={busy}
+              className="bg-surface-container-lowest border border-surface-container-high rounded-lg px-2 py-1 text-xs">
+              {QUALITY.map((q) => <option key={q.value} value={q.value}>{q.label}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs text-on-surface-variant">Colours</span>
+            <select value={colorCount} onChange={(e) => setColorCount(Number(e.target.value))} disabled={busy}
+              className="bg-surface-container-lowest border border-surface-container-high rounded-lg px-2 py-1 text-xs">
+              {[4, 6, 8, 12, 16, 24].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5" title="Higher = smoother curves (less detail)">
+            <span className="text-xs text-on-surface-variant">Smoothness</span>
+            <input type="range" min={1} max={10} step={1} value={smoothness} onChange={(e) => setSmoothness(Number(e.target.value))} disabled={busy} className="w-24 accent-primary" />
+            <span className="text-xs w-4 text-on-surface-variant">{smoothness}</span>
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" checked={removeBackground} onChange={(e) => setRemoveBackground(e.target.checked)} disabled={busy} className="h-4 w-4 accent-primary" />
+            <span className="text-xs">Auto-remove background</span>
+          </label>
+          <button onClick={convert} disabled={busy}
+            className="ml-auto flex items-center gap-1.5 bg-surface-container-high px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-surface-container-highest disabled:opacity-50">
+            <Icon name="autorenew" className="text-sm" /> {busy ? 'Converting…' : 'Re-trace'}
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 min-h-0 p-3 sm:p-5 overflow-y-auto lg:overflow-hidden">
+          {err ? (
+            <div className="h-full flex items-center justify-center text-center text-error">
+              <div><Icon name="error" className="text-4xl mb-2" /><p className="text-sm">{err}</p></div>
+            </div>
+          ) : busy ? (
+            <div className="h-full flex items-center justify-center">
+              <div className="w-full max-w-xs space-y-3 text-center">
+                <Icon name="hourglass_empty" className="text-4xl text-primary animate-pulse" />
+                <div className="h-2 bg-surface-container-high rounded-full overflow-hidden">
+                  <div className="h-full bg-primary transition-all" style={{ width: `${Math.round(progress.progress * 100)}%` }} />
+                </div>
+                <p className="text-xs text-on-surface-variant">{loadingImg ? 'Loading image…' : progress.message}</p>
+              </div>
+            </div>
+          ) : working ? (
+            <SvgVectorEditor svg={working} onChange={onEdit} />
+          ) : (
+            <div className="h-full flex items-center justify-center text-on-surface-variant text-sm">No result yet.</div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center flex-wrap gap-3 px-4 sm:px-6 py-3 border-t border-outline-variant/10">
+          <button onClick={undo} disabled={!history.length || busy}
+            className="flex items-center gap-1.5 bg-surface-container-high px-3 py-2 rounded-xl text-xs font-bold hover:bg-surface-container-highest disabled:opacity-40">
+            <Icon name="undo" className="text-base" /> Undo
+          </button>
+          <span className="hidden sm:inline text-xs text-on-surface-variant">Tip: use the colour list to recolour or remove a whole colour (e.g. the background).</span>
+          <button onClick={download} disabled={!working || busy}
+            className="ml-auto flex items-center gap-2 bg-primary-container text-on-primary-container px-5 py-2.5 rounded-xl font-headline font-black hover:scale-[1.01] active:scale-95 transition-all disabled:opacity-50">
+            <Icon name="download" className="text-lg" /> Download SVG{sizeKB ? ` · ${sizeKB} KB` : ''}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

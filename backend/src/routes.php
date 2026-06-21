@@ -44,6 +44,10 @@ return function (App $app) {
         $api->get('/jobs/{jobId}/status', [GenerationController::class, 'getJobStatus'])
             ->add(new AuthMiddleware());
 
+        // -- Active image engine + UI size/steps policy --------------------
+        $api->get('/ai-config', [GenerationController::class, 'aiConfig'])
+            ->add(new AuthMiddleware());
+
         // -- Exports / credits / user --------------------------------------
         $api->get('/exports', [ExportController::class, 'listForUser'])->add(new AuthMiddleware());
 

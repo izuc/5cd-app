@@ -56,7 +56,19 @@ class GenerationController
             $payload['img_cfg_scale'] = 1.0;
         }
 
-        $jobId = $this->aiPostAsync('/api/generate/async', $payload);
+        // Route pure text-to-image to the optional alt engine (FLUX/Ideogram) when
+        // enabled; reference-guided generation stays on SenseNova. Fall back to
+        // SenseNova if the alt engine is unreachable so enabling it never bricks t2i.
+        $default = $this->aiUrl();
+        $useAlt = $refB64 === null && $this->altEngineEnabled();
+        $target = $useAlt ? $this->altEngineUrl() : $default;
+        $jobId = $this->aiPostAsyncTo($target, '/api/generate/async', $payload);
+        $usedService = $useAlt ? 'alt' : 'sensenova';
+        if (!$jobId && $target !== $default) {
+            error_log('[5cd] Alt engine t2i unreachable; falling back to SenseNova');
+            $jobId = $this->aiPostAsyncTo($default, '/api/generate/async', $payload);
+            $usedService = 'sensenova';
+        }
 
         // Only flip the project into "generating" if the worker actually accepted the
         // job. Otherwise a transient AI outage would brick the project in a state with
@@ -79,6 +91,7 @@ class GenerationController
             $db->prepare('DELETE FROM generations WHERE project_id = ?')->execute([$projectId]);
 
             $config['_last_prompt'] = $prompt;
+            $config['_ai_service'] = $usedService; // which worker to poll for this job
             $stmt = $db->prepare('UPDATE projects SET status = ?, ai_job_id = ?, config_json = ?, chosen_generation_id = NULL, updated_at = NOW() WHERE id = ?');
             $stmt->execute(['generating', $jobId, json_encode($config), $projectId]);
         }
@@ -141,7 +154,20 @@ class GenerationController
             'img_cfg_scale' => (float) ($data['img_cfg_scale'] ?? 1.0),
         ];
 
-        $jobId = $this->aiPostAsync('/api/edit/async', $payload);
+        // Edits run on SenseNova by default. If the optional alt engine is enabled
+        // AND configured to handle edits (it supports i2i, e.g. FLUX), route there;
+        // fall back to SenseNova if it's unreachable or rejects the edit (e.g. an
+        // engine like Ideogram that is text-to-image only returns 400).
+        $default = $this->aiUrl();
+        $useAlt = $this->altEngineEnabled() && $this->altEngineEdits();
+        $target = $useAlt ? $this->altEngineUrl() : $default;
+        $jobId = $this->aiPostAsyncTo($target, '/api/edit/async', $payload);
+        $usedService = $useAlt ? 'alt' : 'sensenova';
+        if (!$jobId && $target !== $default) {
+            error_log('[5cd] Alt engine edit unavailable; falling back to SenseNova');
+            $jobId = $this->aiPostAsyncTo($default, '/api/edit/async', $payload);
+            $usedService = 'sensenova';
+        }
 
         // Only mark generating on a real job; label the resulting generation with the
         // edit instruction (not the previous generate prompt).
@@ -150,6 +176,7 @@ class GenerationController
             $cfgStmt->execute([$projectId]);
             $cfg = json_decode(($cfgStmt->fetch()['config_json'] ?? '{}'), true) ?: [];
             $cfg['_last_prompt'] = $prompt;
+            $cfg['_ai_service'] = $usedService; // which worker to poll for this job
             $stmt = $db->prepare('UPDATE projects SET ai_job_id = ?, status = ?, config_json = ?, updated_at = NOW() WHERE id = ?');
             $stmt->execute([$jobId, 'generating', json_encode($cfg), $projectId]);
         }
@@ -235,13 +262,15 @@ class GenerationController
         // Only allow polling a job that belongs to one of the caller's projects
         // (prevents cross-user disclosure of generated images/prompts via job id).
         $db = Database::getConnection();
-        $stmt = $db->prepare('SELECT id FROM projects WHERE ai_job_id = ? AND user_id = ?');
+        $stmt = $db->prepare('SELECT config_json FROM projects WHERE ai_job_id = ? AND user_id = ?');
         $stmt->execute([$jobId, $userId]);
-        if (!$stmt->fetch()) {
+        $row = $stmt->fetch();
+        if (!$row) {
             return $this->json($response, ['job_id' => $jobId, 'status' => 'unknown', 'progress' => 0], 404);
         }
+        $config = json_decode($row['config_json'] ?? '{}', true) ?: [];
 
-        $url = $this->aiUrl() . '/api/jobs/' . rawurlencode($jobId);
+        $url = $this->aiUrlFor($config) . '/api/jobs/' . rawurlencode($jobId);
 
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -270,7 +299,8 @@ class GenerationController
             return;
         }
 
-        $url = $this->aiUrl() . '/api/jobs/' . rawurlencode($project['ai_job_id']);
+        $config = json_decode($project['config_json'] ?? '{}', true) ?: [];
+        $url = $this->aiUrlFor($config) . '/api/jobs/' . rawurlencode($project['ai_job_id']);
         $ch = curl_init($url);
         curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
         $body = curl_exec($ch);
@@ -405,7 +435,13 @@ class GenerationController
 
     private function aiPostAsync(string $path, array $payload): ?string
     {
-        $url = $this->aiUrl() . $path;
+        return $this->aiPostAsyncTo($this->aiUrl(), $path, $payload);
+    }
+
+    /** POST an async job to a specific worker base URL; returns its job_id or null. */
+    private function aiPostAsyncTo(string $baseUrl, string $path, array $payload): ?string
+    {
+        $url = rtrim($baseUrl, '/') . $path;
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
@@ -454,6 +490,93 @@ class GenerationController
     private function aiUrl(): string
     {
         return rtrim($_ENV['AI_SERVICE_URL'] ?? 'http://127.0.0.1:8090', '/');
+    }
+
+    /** Whether the optional alternate image engine (FLUX/Ideogram) is enabled. */
+    private function altEngineEnabled(): bool
+    {
+        $v = strtolower(trim((string) ($_ENV['ALT_ENGINE_ENABLED'] ?? '')));
+        return in_array($v, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    /** Whether the alt engine should also handle edits (only if it supports i2i, e.g. FLUX). */
+    private function altEngineEdits(): bool
+    {
+        $v = strtolower(trim((string) ($_ENV['ALT_ENGINE_EDITS'] ?? '')));
+        return in_array($v, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    private function altEngineUrl(): string
+    {
+        return rtrim($_ENV['ALT_ENGINE_SERVICE_URL'] ?? 'http://127.0.0.1:8091', '/');
+    }
+
+    /**
+     * Resolve the worker base URL for a project's in-flight job from its stored
+     * service tag. The tag is written server-side only (generate()/edit()), so it
+     * maps to known env URLs and cannot be used for SSRF even though config_json
+     * is otherwise user-writable.
+     */
+    private function aiUrlFor(?array $config): string
+    {
+        $svc = is_array($config) ? (string) ($config['_ai_service'] ?? '') : '';
+        return $svc === 'alt' ? $this->altEngineUrl() : $this->aiUrl();
+    }
+
+    /** Fetch the alt engine worker's /api/health, or null if unreachable. */
+    private function altEngineHealth(): ?array
+    {
+        $ch = curl_init($this->altEngineUrl() . '/api/health');
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 2]);
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($code !== 200 || !$body) {
+            return null;
+        }
+        return json_decode($body, true) ?: null;
+    }
+
+    /**
+     * Report the active text-to-image engine and its UI policy (max resolution,
+     * default size, step count) so the Create page can adapt the size selector to
+     * whichever model will actually run. Pure t2i routing decides the engine:
+     * SenseNova by default, or the alt engine (FLUX/Ideogram) when enabled.
+     */
+    public function aiConfig(Request $request, Response $response): Response
+    {
+        // Defaults = SenseNova (the base engine and the fallback when alt is down).
+        $engine = 'sensenova';
+        $label = 'SenseNova-U1';
+        $maxSide = 2048;
+        $defaultSize = '2048x2048';
+        $steps = 8;
+        $supportsEdit = true;
+
+        if ($this->altEngineEnabled()) {
+            $h = $this->altEngineHealth();
+            if (is_array($h) && !empty($h['engine'])) {
+                $engine = (string) $h['engine'];
+                $maxSide = (int) ($h['max_side'] ?? 1024);
+                $steps = (int) ($h['steps'] ?? 4);
+                $supportsEdit = ((bool) ($h['supports_edit'] ?? false)) && $this->altEngineEdits();
+                $labels = ['flux' => 'FLUX.2-klein', 'ideogram' => 'Ideogram 4'];
+                $label = $labels[$engine] ?? ucfirst($engine);
+                $defaultSize = '1024x1024'; // alt engines run at their ~1MP sweet spot
+            }
+            // Alt enabled but unreachable: keep SenseNova defaults — that's what
+            // generation actually falls back to.
+        }
+
+        return $this->json($response, [
+            'engine' => $engine,
+            'label' => $label,
+            'enabled' => $engine !== 'sensenova',
+            'max_side' => $maxSide,
+            'default_size' => $defaultSize,
+            'steps' => $steps,
+            'supports_edit' => $supportsEdit,
+        ]);
     }
 
     private function uploadsDir(): string

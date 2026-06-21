@@ -95,6 +95,38 @@ exercised end-to-end.
   layer-streaming wrapper keeps most weights on CPU pinned memory and prefetches the next
   layer to the GPU during forward.
 
+### 3b. Optional alternate image engine (FLUX.2-klein / Ideogram 4)
+
+SenseNova handles everything by default. You can *optionally* route **text-to-image**
+(and, for engines that support it, **edits**) to a second engine running in its own
+isolated worker (`alt-engine-service`, port 8091) — ideally on a second GPU. It speaks
+the same job API, so the backend just points the t2i route at it via an env toggle.
+
+```powershell
+cd alt-engine-service
+.\install.ps1 -Engine flux        # FLUX.2-klein: Apache-2.0, ungated, ~4 steps, does t2i + edits
+# or:  .\install.ps1 -Engine ideogram   # Ideogram 4: GATED + NON-COMMERCIAL, set HF_TOKEN in .env first
+.\.venv\Scripts\python.exe run.py
+```
+The installer builds an isolated venv (diffusers-from-main, kept separate from
+SenseNova's pinned diffusers), **clones the engine's associated source repo**
+(`black-forest-labs/flux2` or `ideogram-oss/ideogram4`), downloads the weights, and
+verifies. Linux/macOS: `./install.sh --engine flux`.
+
+Then enable it in `backend/.env`:
+```
+ALT_ENGINE_ENABLED=true
+ALT_ENGINE_EDITS=true          # only if the engine does i2i (FLUX yes, Ideogram no)
+ALT_ENGINE_SERVICE_URL=http://127.0.0.1:8091
+```
+Routing: pure text-to-image → alt engine; reference-guided generation → SenseNova;
+edits → alt engine only when `ALT_ENGINE_EDITS=true` and the engine supports i2i,
+otherwise SenseNova. If the alt worker is unreachable the backend transparently falls
+back to SenseNova, so enabling it never bricks generation.
+
+> **Licensing:** FLUX.2-klein is Apache-2.0 (commercial-OK). Ideogram 4 weights are
+> **Non-Commercial** and gated — only enable that engine for non-commercial use.
+
 ### 4. Frontend
 ```powershell
 cd frontend
@@ -102,6 +134,20 @@ npm install
 npm run dev
 ```
 Open `http://localhost:5180`.
+
+#### Vectorise (raster → SVG)
+The studio has a **Vectorise** button (next to Export) that converts the chosen design
+to a scalable **SVG**, entirely in the browser — no backend involved. The engine
+(`frontend/src/vectorize/`, vendored from the `raster2vector` project) runs in a Web
+Worker: quantise → trace → SVG. It upscales the source before tracing (quality:
+fast 1× / balanced 2× / high 3× / detailed 4×) so even a 1024px generation produces
+crisp curves, with a colour-count control and an optional "auto-remove background".
+
+After tracing it opens a **Vector-Magic-style editor**: click / rectangle selection,
+a **paint** (bucket) tool + **eyedropper**, and a colour list to select / recolour /
+remove every shape of a colour (e.g. click the background colour's trash to drop it).
+Plus apply-colour-to-selection, delete, select-all/invert, and undo. Output is the
+edited `.svg` download.
 
 ## API surface (backend)
 
