@@ -52,6 +52,10 @@ return function (App $app) {
         $api->post('/upscale', [GenerationController::class, 'upscale'])
             ->add(new AuthMiddleware());
 
+        // -- AI prompt expansion (Qwen3 text encoder; "Expand my prompt") --
+        $api->post('/expand-prompt', [GenerationController::class, 'expandPrompt'])
+            ->add(new AuthMiddleware());
+
         // -- Exports / credits / user --------------------------------------
         $api->get('/exports', [ExportController::class, 'listForUser'])->add(new AuthMiddleware());
 

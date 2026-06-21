@@ -96,7 +96,7 @@ export function CreateDesign() {
   const [steps, setSteps] = useState(STEPS);     // active engine's step count
   const [engineLabel, setEngineLabel] = useState('');
   const [numConcepts, setNumConcepts] = useState(1);
-  const [enhance, setEnhance] = useState(false);
+  const [expanding, setExpanding] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [mode, setMode] = useState<'describe' | 'upload'>('describe');
@@ -143,6 +143,23 @@ export function CreateDesign() {
   };
   const onPickFile = (file: File | undefined | null) => readImage(file, setUpload);
 
+  // "Expand my prompt" — rewrite the short description into a detailed brief via the
+  // Qwen3 text encoder and drop it back into the (editable) textarea so it's visible.
+  const handleExpand = async () => {
+    const p = description.trim();
+    if (!p || expanding || loading) return;
+    setError('');
+    setExpanding(true);
+    try {
+      const r = await api.expandPrompt(p, type);
+      if (r.expanded && r.expanded.trim()) setDescription(r.expanded.trim());
+    } catch (err: any) {
+      setError(err.message || 'Could not expand the prompt.');
+    } finally {
+      setExpanding(false);
+    }
+  };
+
   const availableSizes = SIZE_OPTIONS.filter((s) => Math.max(s.w, s.h) <= maxSide);
   const sizePreset = availableSizes.find((s) => s.value === size) || availableSizes[0] || SIZE_OPTIONS[0];
   const typeOption = TYPE_OPTIONS.find((t) => t.value === type) || TYPE_OPTIONS[0];
@@ -167,7 +184,6 @@ export function CreateDesign() {
           description,
           size,
           numConcepts,
-          enhance,
           steps,
           width: sizePreset.w,
           height: sizePreset.h,
@@ -259,11 +275,19 @@ export function CreateDesign() {
         {mode === 'describe' && (
         <>
         <div className="space-y-2">
-          <div className="flex items-baseline justify-between px-1">
+          <div className="flex items-center justify-between px-1">
             <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold">Prompt</label>
-            <span className={`font-label text-[10px] uppercase tracking-widest ${description.length > 30 ? 'text-on-surface-variant' : 'text-outline-variant'}`}>
-              {description.length} chars
-            </span>
+            <div className="flex items-center gap-3">
+              <button type="button" onClick={handleExpand} disabled={loading || expanding || !description.trim()}
+                title="Rewrite your prompt into a detailed brief (AI) — you can edit the result"
+                className="flex items-center gap-1 text-xs font-bold text-primary hover:text-primary/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                <Icon name="auto_fix_high" className={`text-sm ${expanding ? 'animate-spin' : ''}`} />
+                {expanding ? 'Expanding…' : 'Expand'}
+              </button>
+              <span className={`font-label text-[10px] uppercase tracking-widest ${description.length > 30 ? 'text-on-surface-variant' : 'text-outline-variant'}`}>
+                {description.length} chars
+              </span>
+            </div>
           </div>
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} required disabled={loading}
             className="w-full bg-surface-container-lowest border-2 border-surface-container-high rounded-2xl p-5 focus:ring-2 focus:ring-primary/40 focus:border-primary text-on-surface font-medium placeholder:text-outline-variant transition-all text-base resize-none disabled:opacity-60"
@@ -303,28 +327,6 @@ export function CreateDesign() {
             </div>
           </div>
         </div>
-
-        <label className={`flex items-start gap-3 p-4 rounded-2xl border-2 cursor-pointer transition-all ${
-          enhance
-            ? 'border-primary bg-primary-container/20'
-            : 'border-surface-container-high bg-surface-container-lowest hover:border-outline-variant'
-        }`}>
-          <input
-            type="checkbox"
-            checked={enhance}
-            onChange={(e) => setEnhance(e.target.checked)}
-            className="mt-0.5 h-5 w-5 accent-primary cursor-pointer"
-          />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-headline font-bold text-sm text-on-surface">Expand my prompt first</span>
-              <Icon name="auto_fix_high" className="text-base text-primary" />
-            </div>
-            <p className="text-xs text-on-surface-variant mt-0.5">
-              The model rewrites your description into a detailed brief before generating. Slower (~10s extra), often sharper composition.
-            </p>
-          </div>
-        </label>
 
         <div className="space-y-2">
           <label className="font-label text-xs uppercase tracking-widest text-on-surface-variant font-bold px-1">Reference image (optional)</label>

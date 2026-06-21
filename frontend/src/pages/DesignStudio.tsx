@@ -23,6 +23,7 @@ export function DesignStudio() {
   const [error, setError] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [editStrength, setEditStrength] = useState(4); // FLUX.2-klein guidance for edits (higher = bigger change)
   const [progress, setProgress] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
@@ -213,7 +214,7 @@ export function DesignStudio() {
     setChatMessages((prev) => [...prev, { role: 'user', text: msg }, { role: 'assistant', text: '', loading: true }]);
 
     try {
-      const res = await api.edit(parseInt(projectId), msg, chosen.output_image_url);
+      const res = await api.edit(parseInt(projectId), msg, chosen.output_image_url, { guidance_scale: editStrength });
       const jobId = res.job_id;
       // Edits already present before this run — lets us detect the new one if the
       // background poll claims + saves the job before this loop sees it complete.
@@ -490,6 +491,17 @@ export function DesignStudio() {
           </div>
 
           <div className="p-4 border-t border-outline-variant/10">
+            <div className="flex items-center gap-3 mb-2.5 px-1">
+              <span className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant font-bold whitespace-nowrap">Edit strength</span>
+              <input type="range" min={1.5} max={7} step={0.5} value={editStrength}
+                onChange={(e) => setEditStrength(parseFloat(e.target.value))}
+                disabled={busy || !chosen}
+                title="How strongly the model follows your edit. Higher = bigger change to the image."
+                className="flex-1 h-1.5 accent-primary cursor-pointer disabled:opacity-50" />
+              <span className="text-[10px] text-on-surface-variant w-16 text-right">
+                {editStrength <= 2.5 ? 'Subtle' : editStrength >= 5.5 ? 'Strong' : 'Balanced'}
+              </span>
+            </div>
             <form onSubmit={(e) => { e.preventDefault(); handleSendChat(); }} className="flex gap-2 items-end">
               <textarea ref={chatInputRef} value={chatInput} rows={1}
                 onChange={(e) => {

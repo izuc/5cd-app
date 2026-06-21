@@ -20,6 +20,7 @@ import io
 import os
 import random
 import sys
+import threading
 import time
 import uuid
 import warnings
@@ -104,6 +105,9 @@ _pipe_error: str = ""
 _torch = None
 _upscaler = None
 _upscaler_error: str = ""
+# Serializes all GPU model work (generate / edit / upscale / expand) across the
+# executor threads so two CUDA ops never run on the card at once.
+_gpu_lock = threading.Lock()
 
 
 def _round_to_grid(value: int, factor: int = PATCH_FACTOR) -> int:
@@ -272,7 +276,7 @@ def _upscale_pil(img: Image.Image, max_dim: int = 0) -> Optional[Image.Image]:
     tile = UPSCALE_TILE if UPSCALE_TILE > 0 else max(W, H)
     pad = 16  # overlap to hide tile seams
     try:
-        with torch.inference_mode():
+        with _gpu_lock, torch.inference_mode():
             for y in range(0, H, tile):
                 for x in range(0, W, tile):
                     x0, y0 = max(0, x - pad), max(0, y - pad)
@@ -292,6 +296,58 @@ def _upscale_pil(img: Image.Image, max_dim: int = 0) -> Optional[Image.Image]:
     return res
 
 
+_EXPAND_SYS = (
+    "You are a prompt engineer for a text-to-image model that designs logos, posters and "
+    "graphics. Rewrite the user's short description into ONE vivid, detailed image prompt of "
+    "1-3 sentences. Preserve any exact words or phrases they want rendered as text (keep them "
+    "in quotes). Describe the subject, art style, colour palette, composition and background. "
+    "Do not add commentary or options — output ONLY the rewritten prompt."
+)
+
+
+def _expand_prompt(prompt: str, design_type: Optional[str]) -> str:
+    """Rewrite a short prompt into a detailed brief using the already-loaded Qwen3
+    text encoder (no extra VRAM). Returns the original prompt if the model isn't ready."""
+    if not _load_pipeline() or _pipe is None:
+        return prompt
+    torch = _torch
+    pipe = _pipe["pipe"]
+    tok = getattr(pipe, "tokenizer", None)
+    te = getattr(pipe, "text_encoder", None)
+    if tok is None or te is None or not hasattr(te, "generate"):
+        return prompt
+    kind = (design_type or "design").strip() or "design"
+    user = f"Design type: {kind}\nDescription: {prompt}"
+    try:
+        if getattr(tok, "chat_template", None):
+            # enable_thinking=False: Qwen3 is a reasoning model and would otherwise burn
+            # the whole budget inside <think>...</think> and never emit the prompt.
+            inputs = tok.apply_chat_template(
+                [{"role": "system", "content": _EXPAND_SYS}, {"role": "user", "content": user}],
+                add_generation_prompt=True, return_tensors="pt", return_dict=True,
+                enable_thinking=False,
+            ).to(te.device)
+        else:
+            inputs = tok(f"{_EXPAND_SYS}\n\n{user}\n\nPrompt:", return_tensors="pt").to(te.device)
+        in_len = inputs["input_ids"].shape[1]
+        with _gpu_lock, torch.inference_mode():
+            out = te.generate(
+                **inputs, max_new_tokens=200, do_sample=True, temperature=0.7,
+                top_p=0.9, repetition_penalty=1.05, pad_token_id=tok.eos_token_id,
+            )
+        gen = tok.decode(out[0, in_len:], skip_special_tokens=True).strip()
+        if "</think>" in gen:  # belt-and-braces if a think block slips through
+            gen = gen.split("</think>")[-1]
+        gen = gen.strip().strip('"').strip()
+        # Guard against a model that ignores the instruction / returns junk.
+        return gen if len(gen) >= len(prompt) else prompt
+    except Exception as e:  # noqa: BLE001
+        print(f"[expand] failed: {type(e).__name__}: {e}")
+        return prompt
+    finally:
+        _free_vram()
+
+
 def _run(prompt: str, width: int, height: int, steps: int, guidance: float,
          seed: int, ref_pils: Optional[list] = None) -> Image.Image:
     pipe = _pipe["pipe"]
@@ -307,7 +363,8 @@ def _run(prompt: str, width: int, height: int, steps: int, guidance: float,
     if ref_pils:
         # FLUX.2 conditions on reference image(s) via image=; multi-image supported.
         call_kwargs["image"] = ref_pils if len(ref_pils) > 1 else ref_pils[0]
-    with _torch.inference_mode():
+    # Serialize GPU work so generate / edit / upscale / expand never overlap on the card.
+    with _gpu_lock, _torch.inference_mode():
         out = pipe(**call_kwargs)
     return out.images[0]
 
@@ -411,7 +468,7 @@ def _process_generate(job: Job) -> None:
     # Use an explicit guidance_scale if the caller set one, else the FLUX default.
     # The legacy cfg_scale field is ignored (it was the old SenseNova knob, sent as 1.0).
     _g = p.get("guidance_scale")
-    guidance = float(_g) if _g is not None else DEFAULT_GUIDANCE
+    guidance = max(1.0, min(float(_g), 12.0)) if _g is not None else DEFAULT_GUIDANCE
     base_seed = p.get("seed")
     if base_seed is None:
         base_seed = random.randint(0, 2**31 - 1)
@@ -468,7 +525,7 @@ def _process_edit(job: Job) -> None:
     width, height = _clamp_side(int(p.get("width") or refs[0].width), int(p.get("height") or refs[0].height))
     steps = max(1, min(int(p.get("steps") or DEFAULT_STEPS), 50))
     _g = p.get("guidance_scale")
-    guidance = float(_g) if _g is not None else DEFAULT_GUIDANCE
+    guidance = max(1.0, min(float(_g), 12.0)) if _g is not None else DEFAULT_GUIDANCE
     seed = p.get("seed")
     if seed is None:
         seed = random.randint(0, 2**31 - 1)
@@ -580,6 +637,11 @@ class UpscaleRequest(BaseModel):
     max_dim: Optional[int] = None    # cap the long side of the result (default UPSCALE_MAX_DIM)
 
 
+class ExpandRequest(BaseModel):
+    prompt: str
+    design_type: Optional[str] = None
+
+
 app = FastAPI(title="5cd image worker (FLUX.2-klein-4B)", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"])
@@ -635,6 +697,17 @@ async def api_upscale(req: UpscaleRequest):
     if res is None:
         return JSONResponse({"error": _upscaler_error or "upscaler unavailable"}, status_code=503)
     return JSONResponse({"image": _pil_to_b64(res), "width": res.width, "height": res.height})
+
+
+@app.post("/api/expand")
+async def api_expand(req: ExpandRequest):
+    """Rewrite a short prompt into a detailed brief using the loaded Qwen3 text encoder."""
+    p = (req.prompt or "").strip()
+    if not p:
+        return JSONResponse({"error": "prompt is required"}, status_code=400)
+    loop = asyncio.get_event_loop()
+    expanded = await loop.run_in_executor(None, _expand_prompt, p, req.design_type)
+    return JSONResponse({"prompt": p, "expanded": expanded})
 
 
 @app.get("/api/jobs/{job_id}")

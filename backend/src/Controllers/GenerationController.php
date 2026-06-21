@@ -135,9 +135,10 @@ class GenerationController
         $payload = [
             'prompt' => $prompt,
             'ref_images' => [base64_encode($bytes)],
-            'steps' => (int) ($data['steps'] ?? 8),
-            'cfg_scale' => (float) ($data['cfg_scale'] ?? 1.0),
-            'img_cfg_scale' => (float) ($data['img_cfg_scale'] ?? 1.0),
+            'steps' => (int) ($data['steps'] ?? 4),
+            // How strongly FLUX.2-klein follows the edit instruction. Higher = bigger
+            // change. Null lets the worker use its default (4.0); the worker clamps 1–12.
+            'guidance_scale' => isset($data['guidance_scale']) ? (float) $data['guidance_scale'] : null,
         ];
 
         // FLUX.2-klein does the edit as image-to-image (the source is the reference).
@@ -241,7 +242,6 @@ class GenerationController
         if (!$row) {
             return $this->json($response, ['job_id' => $jobId, 'status' => 'unknown', 'progress' => 0], 404);
         }
-        $config = json_decode($row['config_json'] ?? '{}', true) ?: [];
 
         $url = $this->aiUrl() . '/api/jobs/' . rawurlencode($jobId);
 
@@ -272,7 +272,6 @@ class GenerationController
             return;
         }
 
-        $config = json_decode($project['config_json'] ?? '{}', true) ?: [];
         $url = $this->aiUrl() . '/api/jobs/' . rawurlencode($project['ai_job_id']);
         $ch = curl_init($url);
         curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
@@ -537,6 +536,37 @@ class GenerationController
             return $response->withHeader('Content-Type', 'application/json');
         }
         return $this->json($response, ['error' => true, 'message' => 'Upscale failed or unavailable.'], 502);
+    }
+
+    /** Proxy a prompt-expansion request to the worker (Qwen3 text encoder). */
+    public function expandPrompt(Request $request, Response $response): Response
+    {
+        $data = $request->getParsedBody() ?? [];
+        $prompt = trim((string) ($data['prompt'] ?? ''));
+        if ($prompt === '') {
+            return $this->json($response, ['error' => true, 'message' => 'prompt is required'], 400);
+        }
+        $payload = ['prompt' => mb_substr($prompt, 0, 1500)];
+        if (!empty($data['design_type'])) {
+            $payload['design_type'] = (string) $data['design_type'];
+        }
+        $ch = curl_init($this->aiUrl() . '/api/expand');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($payload),
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Expect:'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 60,
+        ]);
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($code === 200 && $body) {
+            $response->getBody()->write($body);
+            return $response->withHeader('Content-Type', 'application/json');
+        }
+        // Soft-fail: return the original prompt so the UI can carry on.
+        return $this->json($response, ['prompt' => $prompt, 'expanded' => $prompt]);
     }
 
     private function uploadsDir(): string

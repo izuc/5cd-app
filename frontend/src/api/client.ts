@@ -83,9 +83,12 @@ export const api = {
   // AI super-resolution (Real-ESRGAN) — used by the vectoriser for a cleaner trace.
   upscale: (image: string, max_dim?: number) =>
     request<{ image: string; width: number; height: number }>('/upscale', { method: 'POST', body: JSON.stringify({ image, max_dim }) }),
+  // Rewrite a short prompt into a detailed brief via the Qwen3 text encoder.
+  expandPrompt: (prompt: string, design_type?: string) =>
+    request<{ prompt: string; expanded: string }>('/expand-prompt', { method: 'POST', body: JSON.stringify({ prompt, design_type }) }),
   generate: (projectId: number, opts: { prompt?: string; num_concepts?: number; width?: number; height?: number; steps?: number; enhance?: boolean } = {}) =>
     request<{ job_id: string; status: string }>(`/projects/${projectId}/generate`, { method: 'POST', body: JSON.stringify(opts) }),
-  edit: (projectId: number, prompt: string, imageUrl?: string, opts: { steps?: number; cfg_scale?: number } = {}) =>
+  edit: (projectId: number, prompt: string, imageUrl?: string, opts: { steps?: number; cfg_scale?: number; guidance_scale?: number } = {}) =>
     request<{ job_id: string; status: string; kind: string }>(`/projects/${projectId}/edit`, {
       method: 'POST',
       body: JSON.stringify({ prompt, image_url: imageUrl, ...opts }),
