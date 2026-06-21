@@ -151,11 +151,21 @@ export function DesignStudio() {
     if (!projectId) return;
     const pid = parseInt(projectId);
     let cancelled = false;
+    const startedAt = Date.now();
+    let errorCount = 0;
+    const MAX_POLL_MS = 4 * 60 * 1000;   // give up after 4 min stuck "generating"
+    const MAX_ERRORS = 5;                  // ~12.5s of consecutive failures
 
     const tick = async () => {
+      // Bail out of an endless "generating" state if the job never resolves.
+      if (Date.now() - startedAt > MAX_POLL_MS) {
+        setError('This is taking longer than expected — the model may be busy. Please try again.');
+        return false;
+      }
       try {
         const res = await api.listGenerations(pid);
         if (cancelled) return;
+        errorCount = 0; // a successful poll clears the failure streak
         const gens = res.generations || [];
         setGenerations(gens);
         const ch = gens.find((g) => g.is_chosen) || pickIfSingle(pid, gens) || null;
@@ -183,7 +193,13 @@ export function DesignStudio() {
           setError('Generation failed — the model was unavailable. Please try again.');
           return false;
         }
-      } catch {}
+      } catch {
+        // Don't spin silently forever if the backend is unreachable.
+        if (++errorCount >= MAX_ERRORS) {
+          setError('Lost connection to the server — check it’s running, then try again.');
+          return false;
+        }
+      }
       return true;
     };
 
@@ -374,8 +390,15 @@ export function DesignStudio() {
         {/* Left: image / concept picker */}
         <div className="lg:w-3/5 flex flex-col bg-surface-container-low overflow-hidden">
           {error && (
-            <div className="m-4 px-4 py-3 rounded-xl bg-error-container/10 text-error text-sm flex items-center gap-2">
-              <Icon name="error" className="text-base" /> {error}
+            <div className="m-4 px-4 py-3 rounded-xl bg-error-container/10 text-error text-sm flex items-center gap-2 flex-wrap">
+              <Icon name="error" className="text-base flex-shrink-0" />
+              <span className="flex-1 min-w-0">{error}</span>
+              {concepts.length === 0 && (
+                <button onClick={handleRegenerate} disabled={busy}
+                  className="font-bold underline hover:no-underline disabled:opacity-50 flex-shrink-0">
+                  Try again
+                </button>
+              )}
             </div>
           )}
 
@@ -400,6 +423,15 @@ export function DesignStudio() {
                     <span>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</span>
                   </div>
                 </div>
+                {elapsed > 75 && (
+                  <div className="text-center space-y-2 pt-1">
+                    <p className="text-xs text-on-surface-variant">Taking longer than usual.</p>
+                    <button onClick={handleRegenerate} disabled={busy}
+                      className="text-xs font-bold text-primary hover:underline disabled:opacity-50">
+                      Start over
+                    </button>
+                  </div>
+                )}
               </div>
             ) : concepts.length > 0 ? (
               <div className="text-center text-on-surface-variant">
