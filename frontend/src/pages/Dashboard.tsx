@@ -171,7 +171,7 @@ export function Dashboard() {
         )}
 
         {loading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="bg-surface-container-low rounded-3xl overflow-hidden animate-pulse">
                 <div className="aspect-square bg-surface-container" />
@@ -204,7 +204,7 @@ export function Dashboard() {
             </div>
           )
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {projects.map((project) => (
               <div key={project.id} className="relative bg-surface-container-lowest rounded-3xl overflow-hidden group border border-outline-variant/5 hover:border-primary-container/40 hover:shadow-xl transition-all">
                 <Link to={`/studio/${project.id}`} className="block">
@@ -215,12 +215,12 @@ export function Dashboard() {
                   </div>
                   <div className="p-5">
                     <h4 className="font-headline font-bold text-base truncate">{project.title}</h4>
-                    <div className="flex items-center gap-2 mt-2 text-on-surface-variant">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2 text-on-surface-variant">
                       <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[project.status] || 'bg-outline'}`} aria-hidden="true" />
                       <span className="font-label text-[10px] uppercase tracking-widest">{project.status}</span>
                       <span className="text-outline-variant" aria-hidden="true">·</span>
                       <span className="font-label text-[10px] uppercase tracking-widest capitalize">{project.type}</span>
-                      <span className="text-outline-variant ml-auto" aria-hidden="true">·</span>
+                      <span className="text-outline-variant" aria-hidden="true">·</span>
                       <span className="font-label text-[10px] uppercase tracking-widest">
                         {new Date(project.updated_at || project.created_at).toLocaleDateString()}
                       </span>

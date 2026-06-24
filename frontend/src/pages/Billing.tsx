@@ -53,7 +53,7 @@ export function Billing() {
           <h1 className="font-headline text-3xl sm:text-4xl font-black tracking-tighter">Credits</h1>
           <p className="text-on-surface-variant mt-1">5 free credits every day. Each design concept costs 1 credit; buy more for higher volume.</p>
         </div>
-        <div className="bg-surface-container-lowest rounded-2xl p-5 shadow-sm">
+        <div className="bg-surface-container-lowest rounded-2xl p-5 shadow-sm w-full sm:w-auto">
           <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Balance</p>
           <p className="font-headline text-3xl font-extrabold mt-1">{user?.credits ?? 0}</p>
           <p className="text-[11px] text-on-surface-variant mt-0.5">includes 5 free / day</p>
@@ -66,7 +66,7 @@ export function Billing() {
         </div>
       )}
 
-      <section className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
         {BUNDLES.map((b) => (
           <div key={b.id} className={`relative bg-surface-container-lowest p-6 rounded-3xl border ${b.featured ? 'border-primary shadow-xl' : 'border-outline-variant/10'} flex flex-col`}>
             {b.badge && (
@@ -98,8 +98,8 @@ export function Billing() {
         {transactions.length === 0 ? (
           <p className="text-on-surface-variant text-sm">No credit activity yet.</p>
         ) : (
-          <div className="bg-surface-container-lowest rounded-2xl overflow-hidden border border-outline-variant/10">
-            <table className="w-full text-sm">
+          <div className="bg-surface-container-lowest rounded-2xl overflow-x-auto border border-outline-variant/10">
+            <table className="w-full min-w-[460px] text-sm">
               <thead className="bg-surface-container-low">
                 <tr className="text-left">
                   <th className="px-4 py-3 font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Date</th>

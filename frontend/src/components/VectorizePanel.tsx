@@ -151,16 +151,16 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-2 sm:p-4" onClick={onClose}>
       <div className="bg-surface rounded-2xl sm:rounded-3xl shadow-2xl w-full max-w-6xl h-[95vh] sm:h-[92vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-3.5 border-b border-outline-variant/10">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 border-b border-outline-variant/10">
           <div className="flex items-center gap-2">
             <Icon name="polyline" className="text-primary" />
             <h2 className="font-headline font-black text-lg">Vectorise &amp; edit</h2>
           </div>
-          <button onClick={onClose} className="text-on-surface-variant hover:text-on-surface" aria-label="Close"><Icon name="close" /></button>
+          <button onClick={onClose} className="p-2 -mr-2 rounded-full text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors" aria-label="Close"><Icon name="close" /></button>
         </div>
 
         {/* Convert settings bar */}
-        <div className="flex flex-wrap items-center gap-3 px-6 py-2.5 border-b border-outline-variant/10 bg-surface-container-low text-sm">
+        <div className="flex flex-wrap items-center gap-3 px-4 sm:px-6 py-2.5 border-b border-outline-variant/10 bg-surface-container-low text-sm">
           <label className="flex items-center gap-1.5">
             <span className="text-xs text-on-surface-variant">Quality</span>
             <select value={quality} onChange={(e) => setQuality(e.target.value as QualityLevel)} disabled={busy}

@@ -8,8 +8,8 @@ export function ThemeCustomizer({ onClose }: { onClose: () => void }) {
   const [customHex, setCustomHex] = useState(themeColor);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface-container-lowest rounded-3xl shadow-2xl w-full max-w-md mx-4 p-8 space-y-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm p-4 overflow-y-auto" onClick={onClose}>
+      <div className="bg-surface-container-lowest rounded-3xl shadow-2xl w-full max-w-md p-6 sm:p-8 space-y-6 max-h-[90vh] overflow-y-auto my-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <h2 className="font-headline text-xl font-extrabold tracking-tight">Customize Theme</h2>
           <button onClick={onClose} className="p-2 rounded-full hover:bg-surface-container-high transition-colors" aria-label="Close">

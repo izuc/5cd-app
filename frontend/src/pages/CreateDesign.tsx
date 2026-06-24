@@ -221,8 +221,8 @@ export function CreateDesign() {
         )}
 
         <div className="flex justify-center">
-          <div className="inline-flex bg-surface-container-high rounded-full p-1 gap-1">
-            {([['describe', 'Describe'], ['upload', 'Upload an image']] as const).map(([m, lbl]) => (
+          <div className="inline-flex max-w-full bg-surface-container-high rounded-full p-1 gap-1">
+            {([['describe', 'Describe'], ['upload', 'Upload image']] as const).map(([m, lbl]) => (
               <button key={m} type="button" onClick={() => { setMode(m); setError(''); }}
                 className={`px-4 sm:px-5 py-2 rounded-full font-headline font-bold text-sm transition-all ${
                   mode === m ? 'bg-primary-container text-on-primary-container shadow-sm' : 'text-on-surface-variant hover:text-on-surface'
@@ -266,7 +266,7 @@ export function CreateDesign() {
                 <label className="flex flex-col items-center justify-center gap-2 py-12 cursor-pointer text-on-surface-variant">
                   <Icon name="upload" className="text-3xl text-primary" />
                   <span className="font-headline font-bold text-sm">Click to choose an image</span>
-                  <span className="text-xs">or drag &amp; drop · PNG, JPG · max 12&nbsp;MB</span>
+                  <span className="text-xs">or drag &amp; drop · PNG, JPG · max 24&nbsp;MB</span>
                   <input type="file" accept="image/*" className="hidden" onChange={(e) => onPickFile(e.target.files?.[0])} />
                 </label>
               )}
@@ -358,8 +358,8 @@ export function CreateDesign() {
             </div>
           ) : (
             <label className="flex items-center gap-2 p-3 rounded-2xl border-2 border-dashed border-surface-container-high bg-surface-container-lowest hover:border-primary/50 cursor-pointer text-on-surface-variant text-sm transition-colors">
-              <Icon name="add_photo_alternate" className="text-xl text-primary" />
-              <span>Attach an image to guide the style</span>
+              <Icon name="add_photo_alternate" className="text-xl text-primary flex-shrink-0" />
+              <span className="min-w-0">Attach an image to guide the style</span>
               <input type="file" accept="image/*" className="hidden" onChange={(e) => readImage(e.target.files?.[0], setReference)} />
             </label>
           )}

@@ -75,7 +75,7 @@ export function Settings() {
             placeholder="New password (min 6)" autoComplete="new-password"
             className="w-full bg-surface-container-low rounded-xl p-3 focus:ring-2 focus:ring-primary/40 text-sm" />
           <button type="submit" disabled={pwBusy}
-            className="bg-primary text-on-primary px-5 py-2.5 rounded-xl font-headline font-bold text-sm disabled:opacity-50">
+            className="bg-primary text-on-primary px-5 py-3 rounded-xl font-headline font-bold text-sm disabled:opacity-50">
             {pwBusy ? 'Saving…' : 'Update password'}
           </button>
         </form>
@@ -93,7 +93,7 @@ export function Settings() {
           placeholder="Confirm with your password"
           className="w-full bg-surface-container-low rounded-xl p-3 focus:ring-2 focus:ring-error/40 text-sm" />
         <button onClick={handleDeleteAccount} disabled={deleting || !deletePassword}
-          className="bg-error text-on-error px-5 py-2.5 rounded-xl font-headline font-bold text-sm disabled:opacity-50">
+          className="bg-error text-on-error px-5 py-3 rounded-xl font-headline font-bold text-sm disabled:opacity-50">
           {deleting ? 'Deleting…' : 'Delete account'}
         </button>
       </section>

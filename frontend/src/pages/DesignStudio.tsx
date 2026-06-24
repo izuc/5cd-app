@@ -344,7 +344,7 @@ export function DesignStudio() {
   const lineage = buildLineage(generations, chosen);
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="flex-1 flex flex-col lg:overflow-hidden">
       {/* Top bar */}
       <div className="flex items-center justify-between px-4 sm:px-8 py-4 border-b border-outline-variant/10 bg-surface">
         <div className="flex items-center gap-3 min-w-0">
@@ -356,24 +356,24 @@ export function DesignStudio() {
             <p className="text-xs text-on-surface-variant truncate">{cfg.description || `${project.type} project`}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
           <button onClick={() => setConfirmRegenerate(true)} disabled={generating}
-            className="flex items-center gap-1.5 bg-surface-container-high px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 hover:bg-surface-container-highest"
+            className="flex items-center gap-1.5 bg-surface-container-high px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 hover:bg-surface-container-highest"
             title="Regenerate (replaces current concepts)">
-            <Icon name="autorenew" className="text-base" /> Regenerate
+            <Icon name="autorenew" className="text-base" /> <span className="hidden sm:inline">Regenerate</span>
           </button>
           <button onClick={() => setShowVectorize(true)} disabled={!chosen}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold transition-all ${
               chosen ? 'bg-surface-container-high hover:bg-surface-container-highest' : 'bg-surface-container-high text-on-surface-variant opacity-50 cursor-not-allowed'
             }`}
             title="Convert the selected design to a scalable SVG">
-            <Icon name="polyline" className="text-base" /> Vectorise
+            <Icon name="polyline" className="text-base" /> <span className="hidden sm:inline">Vectorise</span>
           </button>
           <Link to={`/export/${project.id}`}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold transition-all ${
               chosen ? 'bg-primary-container text-on-primary-container hover:scale-105' : 'bg-surface-container-high text-on-surface-variant pointer-events-none opacity-50'
             }`}>
-            <Icon name="download" className="text-base" /> Export
+            <Icon name="download" className="text-base" /> <span className="hidden sm:inline">Export</span>
           </Link>
         </div>
       </div>
@@ -386,9 +386,9 @@ export function DesignStudio() {
         />
       )}
 
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Left: image / concept picker */}
-        <div className="lg:w-3/5 flex flex-col bg-surface-container-low overflow-hidden">
+        <div className="lg:flex-1 flex flex-col bg-surface-container-low lg:overflow-hidden">
           {error && (
             <div className="m-4 px-4 py-3 rounded-xl bg-error-container/10 text-error text-sm flex items-center gap-2 flex-wrap">
               <Icon name="error" className="text-base flex-shrink-0" />
@@ -402,7 +402,7 @@ export function DesignStudio() {
             </div>
           )}
 
-          <div className="flex-1 flex items-center justify-center p-6 min-h-[300px]">
+          <div className="flex-1 flex items-center justify-center p-4 sm:p-6 min-h-[240px] sm:min-h-[300px]">
             {chosen ? (
               <img src={chosen.output_image_url + '?t=' + chosen.id}
                 alt="Selected design" className="max-w-full max-h-full object-contain rounded-2xl shadow-xl bg-white" />
@@ -482,7 +482,7 @@ export function DesignStudio() {
         </div>
 
         {/* Right: chat */}
-        <div className="lg:w-2/5 flex flex-col bg-surface border-l border-outline-variant/10">
+        <div className="lg:w-2/5 xl:max-w-md flex flex-col bg-surface border-t lg:border-t-0 lg:border-l border-outline-variant/10">
           <div className="p-4 border-b border-outline-variant/10 flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center">
               <Icon name="chat" className="text-sm text-on-primary-container" />
@@ -493,7 +493,7 @@ export function DesignStudio() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          <div className="overflow-y-auto p-4 space-y-3 min-h-[200px] lg:flex-1 lg:min-h-0">
             {chatMessages.length === 0 ? (
               <div className="text-on-surface-variant text-sm text-center mt-12 px-6">
                 {chosen
@@ -503,7 +503,7 @@ export function DesignStudio() {
             ) : (
               chatMessages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} gap-2`}>
-                  <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                  <div className={`max-w-[90%] sm:max-w-[85%] rounded-2xl px-4 py-3 ${
                     msg.role === 'user'
                       ? 'bg-primary-container text-on-primary-container rounded-br-md'
                       : 'bg-surface-container-high text-on-surface rounded-bl-md'
@@ -533,7 +533,7 @@ export function DesignStudio() {
                 onChange={(e) => setEditStrength(parseFloat(e.target.value))}
                 disabled={busy || !chosen}
                 title="How strongly the model follows your edit. Higher = bigger change to the image."
-                className="flex-1 h-1.5 accent-primary cursor-pointer disabled:opacity-50" />
+                className="flex-1 h-2 accent-primary cursor-pointer touch-pan-y py-2 disabled:opacity-50" />
               <span className="text-[10px] text-on-surface-variant w-16 text-right">
                 {editStrength <= 2.5 ? 'Subtle' : editStrength >= 5.5 ? 'Strong' : 'Balanced'}
               </span>

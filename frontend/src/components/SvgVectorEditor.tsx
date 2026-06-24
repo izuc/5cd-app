@@ -156,12 +156,12 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
         <div className="flex items-center flex-wrap gap-1 mb-2">
           {TOOLS.map(([t, icon, label]) => (
             <button key={t} onClick={() => setTool(t)} title={label}
-              className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all ${tool === t ? 'bg-primary-container text-on-primary-container' : 'bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest'}`}>
+              className={`w-10 h-10 lg:w-9 lg:h-9 rounded-lg flex items-center justify-center transition-all ${tool === t ? 'bg-primary-container text-on-primary-container' : 'bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest'}`}>
               <Icon name={icon} className="text-lg" />
             </button>
           ))}
           <input type="color" value={paint} onChange={(e) => setPaint(e.target.value)} title="Paint colour"
-            className="w-9 h-9 rounded-lg border-2 border-surface-container-high bg-transparent cursor-pointer p-0.5 ml-1" />
+            className="w-10 h-10 lg:w-9 lg:h-9 rounded-lg border-2 border-surface-container-high bg-transparent cursor-pointer p-0.5 ml-1" />
           <span className="ml-auto text-xs text-on-surface-variant">{elements.length} shapes · {selected.size} sel.</span>
         </div>
 

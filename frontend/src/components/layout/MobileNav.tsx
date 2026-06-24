@@ -31,7 +31,7 @@ export function MobileNav() {
         }
         return (
           <Link key={item.label} to={item.path} aria-current={isActive ? 'page' : undefined}
-            className={`flex flex-col items-center gap-1 ${isActive ? 'text-primary' : 'text-on-surface-variant'}`}>
+            className={`flex-1 flex flex-col items-center justify-center gap-1 py-1 min-h-[44px] ${isActive ? 'text-primary' : 'text-on-surface-variant'}`}>
             <Icon name={item.icon} filled={isActive} />
             <span className="text-[10px] font-label font-bold">{item.label}</span>
           </Link>

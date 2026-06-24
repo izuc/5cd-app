@@ -22,7 +22,7 @@ export function AppLayout() {
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <Header />
-        <main key={location.pathname} className="route-fade flex-1 flex flex-col overflow-auto pb-20 lg:pb-0">
+        <main key={location.pathname} className="route-fade flex-1 flex flex-col overflow-auto pb-[calc(5rem+env(safe-area-inset-bottom))] lg:pb-0">
           <Outlet />
         </main>
       </div>

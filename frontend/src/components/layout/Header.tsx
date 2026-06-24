@@ -49,7 +49,7 @@ export function Header() {
                     </span>
                   </button>
                   {showMenu && (
-                    <div className="absolute right-0 top-12 bg-surface-container-lowest rounded-xl shadow-xl border border-outline-variant/10 py-2 w-48 z-50">
+                    <div className="absolute right-0 top-12 bg-surface-container-lowest rounded-xl shadow-xl border border-outline-variant/10 py-2 w-48 max-w-[calc(100vw-1rem)] z-50">
                       <div className="px-4 py-2 border-b border-outline-variant/10">
                         <p className="font-headline font-bold text-sm truncate">{user.display_name || user.email}</p>
                         <p className="text-xs text-on-surface-variant truncate">{user.email}</p>

@@ -5,7 +5,7 @@ import { usePageTitle } from '../hooks/usePageTitle';
 export function NotFound() {
   usePageTitle('Not Found');
   return (
-    <main className="min-h-screen flex items-center justify-center px-6">
+    <main className="min-h-screen flex items-center justify-center px-6 bg-surface">
       <div className="text-center space-y-6 max-w-md">
         <Icon name="search_off" className="text-7xl text-outline-variant" />
         <h1 className="font-headline text-4xl font-black tracking-tighter">Page not found</h1>

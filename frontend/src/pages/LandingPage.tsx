@@ -5,9 +5,9 @@ export function LandingPage() {
   return (
     <main className="hero-gradient min-h-screen">
       <section className="max-w-[1440px] mx-auto px-6 pt-20 pb-24 md:pt-32">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-16 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-16 items-center">
           <div className="lg:col-span-7 flex flex-col items-start gap-8">
-            <h1 className="font-headline text-5xl sm:text-6xl md:text-8xl font-black tracking-tighter leading-[0.9] text-on-surface">
+            <h1 className="font-headline text-[2.5rem] sm:text-6xl md:text-8xl font-black tracking-tighter leading-[0.9] text-on-surface">
               Designs<br />from <span className="text-primary italic">5 cents</span>
             </h1>
             <p className="text-lg sm:text-xl text-on-surface-variant max-w-lg leading-relaxed">

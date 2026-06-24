@@ -29,13 +29,13 @@ export function Register() {
   };
 
   return (
-    <main className="min-h-[calc(100vh-72px)] flex items-center justify-center px-6 py-12 bg-surface">
+    <main className="min-h-[calc(100vh-64px)] sm:min-h-[calc(100vh-72px)] flex items-center justify-center px-6 py-8 sm:py-12 bg-surface">
       <div className="w-full max-w-md space-y-8">
         <div className="text-center">
           <h1 className="font-headline text-4xl font-black tracking-tighter text-on-surface">Create your account</h1>
           <p className="text-on-surface-variant mt-2">5 free credits every day to design with</p>
         </div>
-        <form onSubmit={handleSubmit} className="bg-surface-container-lowest p-8 rounded-3xl shadow-[0_20px_40px_rgba(30,30,30,0.06)] space-y-6">
+        <form onSubmit={handleSubmit} className="bg-surface-container-lowest p-6 sm:p-8 rounded-3xl shadow-[0_20px_40px_rgba(30,30,30,0.06)] space-y-6">
           {error && (
             <div className="bg-error-container/10 text-error border border-error/20 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
               <Icon name="error" className="text-lg" /> {error}
