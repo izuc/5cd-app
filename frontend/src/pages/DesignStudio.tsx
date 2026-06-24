@@ -388,7 +388,7 @@ export function DesignStudio() {
 
       <div className="flex-1 flex flex-col lg:flex-row lg:overflow-hidden">
         {/* Left: image / concept picker */}
-        <div className="lg:flex-1 flex flex-col bg-surface-container-low lg:overflow-hidden">
+        <div className="lg:flex-1 flex flex-col bg-surface-container-low lg:overflow-y-auto">
           {error && (
             <div className="m-4 px-4 py-3 rounded-xl bg-error-container/10 text-error text-sm flex items-center gap-2 flex-wrap">
               <Icon name="error" className="text-base flex-shrink-0" />
@@ -402,7 +402,7 @@ export function DesignStudio() {
             </div>
           )}
 
-          <div className="flex-1 flex items-center justify-center p-4 sm:p-6 min-h-[240px] sm:min-h-[300px]">
+          <div className="flex-1 flex items-center justify-center p-4 sm:p-6 min-h-[240px] sm:min-h-[300px] lg:min-h-0">
             {chosen ? (
               <img src={chosen.output_image_url + '?t=' + chosen.id}
                 alt="Selected design" className="max-w-full max-h-full object-contain rounded-2xl shadow-xl bg-white" />
@@ -447,7 +447,7 @@ export function DesignStudio() {
           </div>
 
           {concepts.length > 1 && (
-            <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest">
+            <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest flex-shrink-0">
               <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Concepts</p>
               <div className="flex gap-3 overflow-x-auto">
                 {concepts.map((g, i) => (
@@ -463,7 +463,7 @@ export function DesignStudio() {
           )}
 
           {editHistory.length > 0 && (
-            <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest">
+            <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest flex-shrink-0">
               <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Versions · click to revert</p>
               <div className="flex gap-3 overflow-x-auto">
                 {lineage.map((g, i) => (
