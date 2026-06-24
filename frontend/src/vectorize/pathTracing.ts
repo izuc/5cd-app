@@ -208,11 +208,18 @@ export function fitSmoothCurve(points: Point[], tension: number = 0.5): Point[] 
   return result;
 }
 
-// Multi-stage path refinement pipeline
+// Multi-stage path refinement pipeline.
+// `simplifyScale` is the label-upscale factor: the trace runs at upscaled resolution
+// (e.g. 2-4×) and the path is scaled back down afterwards, so the RDP tolerance must
+// be multiplied by it or the simplification is too fine to collapse the nearest-
+// neighbour stair-steps — leaving wavy/patchy edges. Because RDP preserves true
+// corners (points far from the simplified line), scaling the tolerance straightens
+// stair-stepped EDGES without rounding off real corners/vertices.
 function refinePathMultiStage(
   rawPoints: Point[],
   smoothness: number,
-  qualityLevel: 'fast' | 'balanced' | 'high' | 'detailed' = 'balanced'
+  qualityLevel: 'fast' | 'balanced' | 'high' | 'detailed' = 'balanced',
+  simplifyScale: number = 1
 ): Point[] {
   if (rawPoints.length < 3) return rawPoints;
 
@@ -224,7 +231,7 @@ function refinePathMultiStage(
 
   if (qualityLevel === 'fast') {
     // Fast: aggressive simplification
-    const simplified = simplifyPath(points, Math.max(1.0, smoothness * 0.3));
+    const simplified = simplifyPath(points, Math.max(1.0, smoothness * 0.3) * simplifyScale);
     if (simplified.length < 3) return rawPoints;
     return simplified;
   }
@@ -234,7 +241,7 @@ function refinePathMultiStage(
     // Almost no smoothing - preserve original traced edges
     points = smoothPathPreservingCorners(points, corners, 1, 0.02);
     // Minimal simplification - keep nearly all points for sharp text
-    points = simplifyPath(points, Math.max(0.1, smoothness * 0.05));
+    points = simplifyPath(points, Math.max(0.1, smoothness * 0.05) * simplifyScale);
 
     if (points.length < 3) return rawPoints;
     return points;
@@ -243,7 +250,7 @@ function refinePathMultiStage(
   if (qualityLevel === 'balanced') {
     // Balanced: moderate smoothing, good detail
     points = smoothPathPreservingCorners(points, corners, 1, 0.12);
-    points = simplifyPath(points, Math.max(0.5, smoothness * 0.2));
+    points = simplifyPath(points, Math.max(0.5, smoothness * 0.2) * simplifyScale);
 
     if (points.length < 3) return rawPoints;
     return points;
@@ -251,7 +258,7 @@ function refinePathMultiStage(
 
   // HIGH QUALITY: Good balance of smoothness and detail
   points = smoothPathPreservingCorners(points, corners, 1, 0.15);
-  points = simplifyPath(points, Math.max(0.4, smoothness * 0.15));
+  points = simplifyPath(points, Math.max(0.4, smoothness * 0.15) * simplifyScale);
 
   if (points.length < 3) return rawPoints;
   return points;
@@ -354,17 +361,27 @@ export function pointsToSvgPath(points: Point[]): string {
 
 // ============ Efficient Region Tracing ============
 
-// Morphological dilation to merge nearby same-color regions
+// A pixel bounding box (inclusive) so morphology only touches a colour's actual
+// footprint instead of the whole (possibly ~4096²) canvas. Without this, closing
+// is O(colours × W × H × window) and dominates trace time at upscaled resolution.
+type BBox = { x0: number; y0: number; x1: number; y1: number };
+const clampBox = (b: BBox, width: number, height: number, pad: number): BBox => ({
+  x0: Math.max(0, b.x0 - pad), y0: Math.max(0, b.y0 - pad),
+  x1: Math.min(width - 1, b.x1 + pad), y1: Math.min(height - 1, b.y1 + pad),
+});
+
+// Morphological dilation to merge nearby same-color regions (bounded to `box`).
 function dilateColorMask(
   mask: Uint8Array,
   width: number,
   height: number,
-  radius: number = 1
+  radius: number,
+  box: BBox
 ): Uint8Array {
   const result = new Uint8Array(width * height);
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let y = box.y0; y <= box.y1; y++) {
+    for (let x = box.x0; x <= box.x1; x++) {
       if (mask[y * width + x] === 1) {
         // Dilate: set all neighbors within radius
         for (let dy = -radius; dy <= radius; dy++) {
@@ -384,16 +401,18 @@ function dilateColorMask(
 }
 
 // Morphological erosion to restore original shape boundaries after dilation
+// (bounded to `box`, which should be the dilated extent = original bbox + radius).
 function erodeColorMask(
   mask: Uint8Array,
   width: number,
   height: number,
-  radius: number = 1
+  radius: number,
+  box: BBox
 ): Uint8Array {
   const result = new Uint8Array(width * height);
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let y = box.y0; y <= box.y1; y++) {
+    for (let x = box.x0; x <= box.x1; x++) {
       // Check if all neighbors within radius are set
       let allSet = true;
       outer: for (let dy = -radius; dy <= radius; dy++) {
@@ -415,15 +434,18 @@ function erodeColorMask(
   return result;
 }
 
-// Morphological closing (dilate then erode) - merges nearby regions
+// Morphological closing (dilate then erode) - merges nearby regions, bounded to
+// `box` (the colour's pixel footprint). Dilation grows the footprint by `radius`,
+// so erosion runs over box+radius to restore it.
 function closeColorMask(
   mask: Uint8Array,
   width: number,
   height: number,
-  radius: number = 2
+  radius: number,
+  box: BBox
 ): Uint8Array {
-  const dilated = dilateColorMask(mask, width, height, radius);
-  return erodeColorMask(dilated, width, height, radius);
+  const dilated = dilateColorMask(mask, width, height, radius, box);
+  return erodeColorMask(dilated, width, height, radius, clampBox(box, width, height, radius));
 }
 
 // Directions: N, NE, E, SE, S, SW, W, NW
@@ -606,7 +628,8 @@ export function traceAllColors(
   onProgress?: (progress: number) => void,
   qualityLevel: 'fast' | 'balanced' | 'high' | 'detailed' = 'balanced',
   foregroundMask?: Uint8Array | null,
-  mergeNeighbors: boolean = true // NEW: merge nearby same-color regions
+  mergeNeighbors: boolean = true, // merge nearby same-color regions
+  simplifyScale: number = 1       // label-upscale factor (scales RDP tolerance)
 ): ShapeData[] {
   const result: ShapeData[] = [];
 
@@ -629,29 +652,42 @@ export function traceAllColors(
     // Skip invalid indices and transparent marker (255)
     if (colorIndex >= palette.length || colorIndex === 255) continue;
 
-    // Create a binary mask for this color
-    // Skip pixels that are masked out (transparent areas)
+    // Create a binary mask for this color, tracking its pixel bounding box so the
+    // (expensive) morphological closing only touches this colour's footprint.
+    // Skip pixels that are masked out (transparent areas).
     const colorMask = new Uint8Array(width * height);
+    let cnt = 0;
+    let bx0 = width, by0 = height, bx1 = -1, by1 = -1;
     for (let i = 0; i < quantized.length; i++) {
       if (quantized[i] === colorIndex) {
         // Only include pixel if no mask, or mask says it's visible (1)
         if (!foregroundMask || foregroundMask[i] === 1) {
           colorMask[i] = 1;
+          cnt++;
+          const x = i % width, y = (i / width) | 0;
+          if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+          if (y < by0) by0 = y; if (y > by1) by1 = y;
         }
       }
     }
 
+    // Colour not present (e.g. entirely masked out) — nothing to trace.
+    if (cnt === 0) { colorsProcessed++; if (onProgress) onProgress(colorsProcessed / colorsToTrace.length); continue; }
+    const colorBox: BBox = { x0: bx0, y0: by0, x1: bx1, y1: by1 };
+
     // Apply morphological closing to merge nearby regions (if enabled)
     const processedMask = mergeRadius > 0
-      ? closeColorMask(colorMask, width, height, mergeRadius)
+      ? closeColorMask(colorMask, width, height, mergeRadius, colorBox)
       : colorMask;
 
     // Track visited pixels for this color
     const visited = new Uint8Array(width * height);
 
-    // Scan for regions in the processed mask
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
+    // Scan for regions in the processed mask — only within this colour's footprint
+    // (closing can grow it by mergeRadius), not the whole canvas.
+    const scanBox = clampBox(colorBox, width, height, mergeRadius);
+    for (let y = scanBox.y0; y <= scanBox.y1; y++) {
+      for (let x = scanBox.x0; x <= scanBox.x1; x++) {
         const idx = y * width + x;
 
         if (visited[idx]) continue;
@@ -747,7 +783,7 @@ export function traceAllColors(
           // C. Only keep path if area is sufficient
           if (pixelCount >= minArea && boundary.length > 2) {
             // Use multi-stage refinement pipeline
-            let refined = refinePathMultiStage(boundary, smoothness, qualityLevel);
+            let refined = refinePathMultiStage(boundary, smoothness, qualityLevel, simplifyScale);
 
             // Ensure consistent clockwise winding for proper SVG fill behavior
             refined = ensureClockwise(refined);
@@ -905,6 +941,12 @@ export function generateSvg(
     // Include foreground shapes + small background shapes (interior details like letter holes)
 
     const smallShapeThreshold = width * height * 0.05; // 5% of image area
+    // Only punch a background-coloured enclosed region into a transparent hole if it's
+    // big enough to be a real counter (letter interior, donut hole). `shape.area` is in
+    // working (upscaled) pixels, so scale the threshold by pathScale². Tiny dominant-
+    // colour speckles INSIDE solid shapes (anti-alias dust) must NOT be punched, or the
+    // shape turns to swiss cheese — they're dropped and left covered by the shape below.
+    const holeMinArea = width * height * (pathScale * pathScale) * 0.0002;
     type FShape = { hex: string; path: string; area: number; bbox: number[]; holes: string[] };
     const drawn: FShape[] = [];
     const holeShapes: { path: string; bbox: number[] }[] = [];
@@ -927,9 +969,12 @@ export function generateSvg(
 
       // An enclosed region in the background colour is a HOLE/counter (letter
       // interiors, donut holes). Punch it out (fill-rule evenodd) so it's truly
-      // transparent instead of filled with the background colour.
+      // transparent instead of filled with the background colour — but only if it's
+      // large enough to be a genuine counter; tiny speckles are skipped (see above).
       if (isDominantBg && !shape.isBackground) {
-        holeShapes.push({ path: shape.path, bbox: bboxOf(shape.path) });
+        if (shape.area >= holeMinArea) {
+          holeShapes.push({ path: shape.path, bbox: bboxOf(shape.path) });
+        }
         continue;
       }
 
@@ -961,8 +1006,9 @@ export function generateSvg(
     drawn.sort((a, b) => b.area - a.area);
 
     // Same-colour stroke bridges the anti-aliasing seam (the "white gaps"); see note
-    // in standard mode below. ~2.5 viewBox units to survive the small editor preview.
-    const strokeWidth = Math.max(2.5, 3 / pathScale);
+    // in standard mode below. Proportional to the viewBox so it stays a constant
+    // on-screen thickness regardless of resolution.
+    const strokeWidth = Math.max(1.5, Math.min(width, height) * 0.004);
     svg += `    <g id="shapes-layer">\n`;
     for (const s of drawn) {
       let d = scalePathString(s.path, pathScale);
@@ -995,9 +1041,10 @@ export function generateSvg(
     allShapesFlat.sort((a, b) => b.area - a.area);
 
     // Same-colour stroke to bridge the browser's anti-aliasing seam between
-    // abutting fills (the "white gaps"). In viewBox units, so it must be large
-    // enough to stay >=1 device px even when the SVG is displayed small.
-    const strokeWidthStd = Math.max(2.5, 3 / pathScale);
+    // abutting fills (the "white gaps"). Proportional to the viewBox (min side) so it
+    // stays a constant on-screen thickness whatever the trace resolution — the old
+    // `max(2.5, 3/pathScale)` was only ~0.7 device px on a 2048-viewBox AI trace.
+    const strokeWidthStd = Math.max(1.5, Math.min(width, height) * 0.004);
     svg += `    <g id="shapes-layer">\n`;
     for (const { hex, path } of allShapesFlat) {
       const scaledPath = scalePathString(path, pathScale);

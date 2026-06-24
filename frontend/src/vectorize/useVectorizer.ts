@@ -8,8 +8,8 @@ interface UseImageConverterReturn {
   pathData: ShapeData[];
   svgContent: string;
   progress: ConversionProgress;
+  error: string;
   processImage: (imageData: ImageData, settings: ConversionSettings) => void;
-  regenerateSvg: (settings: ConversionSettings) => void;
   updateColor: (index: number, color: Color) => void;
 }
 
@@ -17,15 +17,13 @@ export function useVectorizer(): UseImageConverterReturn {
   const [palette, setPalette] = useState<Color[]>([]);
   const [pathData, setPathData] = useState<ShapeData[]>([]);
   const [svgContent, setSvgContent] = useState<string>('');
+  const [error, setError] = useState<string>('');
   const [progress, setProgress] = useState<ConversionProgress>({
     stage: 'idle',
     progress: 0,
     message: 'Ready'
   });
 
-  // Store for regeneration
-  const quantizedDataRef = useRef<number[] | null>(null);
-  const imageDimensionsRef = useRef<{ width: number; height: number } | null>(null);
   const workerRef = useRef<Worker | null>(null);
 
   // Initialize worker
@@ -50,10 +48,6 @@ export function useVectorizer(): UseImageConverterReturn {
 
         case 'complete':
           if (data.palette) setPalette(data.palette);
-          if (data.quantizedData) quantizedDataRef.current = data.quantizedData;
-          if (data.width && data.height) {
-            imageDimensionsRef.current = { width: data.width, height: data.height };
-          }
           if (data.pathData) setPathData(data.pathData);
           if (data.svgContent) {
             // Optimize SVG on conversion for smaller size and faster editor
@@ -71,6 +65,7 @@ export function useVectorizer(): UseImageConverterReturn {
           break;
 
         case 'error':
+          setError(data.message || 'Vectorise failed.');
           setProgress({
             stage: 'idle',
             progress: 0,
@@ -91,13 +86,14 @@ export function useVectorizer(): UseImageConverterReturn {
   ) => {
     if (!workerRef.current) return;
 
+    setError('');
     setProgress({
       stage: 'loading',
       progress: 0,
       message: 'Starting conversion...'
     });
 
-    // Pass ImageData buffer directly (efficient copy)
+    // Pass ImageData buffer directly (structured-clone copy; see note below)
     workerRef.current.postMessage({
       type: 'process',
       imageData: {
@@ -117,36 +113,6 @@ export function useVectorizer(): UseImageConverterReturn {
     });
   }, []);
 
-  const regenerateSvg = useCallback((settings: ConversionSettings) => {
-    if (!workerRef.current || !quantizedDataRef.current || !imageDimensionsRef.current) return;
-
-    setProgress({
-      stage: 'tracing',
-      progress: 0.4,
-      message: 'Regenerating with selected colors...'
-    });
-
-    workerRef.current.postMessage({
-      type: 'regenerate',
-      imageData: {
-        width: imageDimensionsRef.current.width,
-        height: imageDimensionsRef.current.height,
-        data: new Uint8ClampedArray(0)
-      },
-      settings: {
-        colorCount: settings.colorCount,
-        smoothness: settings.smoothness,
-        minArea: settings.minArea,
-        removeBackground: settings.removeBackground,
-        hasTransparentSource: settings.hasTransparentSource,
-        selectedColors: Array.from(settings.selectedColors),
-        qualityLevel: settings.qualityLevel
-      },
-      palette,
-      quantizedData: quantizedDataRef.current
-    });
-  }, [palette]);
-
   const updateColor = useCallback((index: number, color: Color) => {
     setPalette(prev => {
       const newPalette = [...prev];
@@ -162,8 +128,8 @@ export function useVectorizer(): UseImageConverterReturn {
     pathData,
     svgContent,
     progress,
+    error,
     processImage,
-    regenerateSvg,
     updateColor
   };
 }

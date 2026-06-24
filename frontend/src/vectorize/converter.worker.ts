@@ -1,13 +1,13 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
 
 interface WorkerMessage {
-  type: 'process' | 'regenerate';
+  type: 'process';
   imageData?: {
     width: number;
     height: number;
@@ -22,8 +22,6 @@ interface WorkerMessage {
     selectedColors: number[];
     qualityLevel?: QualityLevel;
   };
-  palette?: Color[];
-  quantizedData?: Uint8Array;
 }
 
 interface WorkerResponse {
@@ -31,7 +29,6 @@ interface WorkerResponse {
   progress?: number;
   message?: string;
   palette?: Color[];
-  quantizedData?: number[];
   pathData?: ShapeData[];
   svgContent?: string;
   width?: number;
@@ -55,7 +52,7 @@ function upscaleLabels(labels: Uint8Array, w: number, h: number, sf: number): Ui
 }
 
 self.onmessage = (e: MessageEvent<WorkerMessage>) => {
-  const { type, imageData, settings, palette, quantizedData } = e.data;
+  const { type, imageData, settings } = e.data;
 
   const postProgress = (p: number, m: string) => {
     self.postMessage({ type: 'progress', progress: p, message: m } as WorkerResponse);
@@ -120,10 +117,20 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         if (finalMask) finalMask = upscaleMask(finalMask, origWidth, origHeight, scaleFactor);
         workingWidth = origWidth * scaleFactor;
         workingHeight = origHeight * scaleFactor;
+        // One majority pass on the upscaled labels rounds off the nearest-neighbour
+        // stair-steps and re-absorbs thin intermediate-shade slivers along edges, so
+        // boundaries trace as clean lines instead of patchy/wavy ones.
+        traceLabels = denoiseQuantized(traceLabels, workingWidth, workingHeight, 1);
       }
 
       postProgress(0.6, 'Tracing shapes...');
       const selectedSet = new Set(selectedColors);
+      // Drop sub-perceptual speckle regions (anti-alias dust along edges). Keyed to a
+      // fraction of the working area so it stays resolution-adaptive: aggressive on the
+      // high-res AI-upscaled trace (~4096px, where speckle explodes) and gentle on
+      // low-res sources. ~5e-6 ≈ a 4-5px blob at native res; verified not to touch the
+      // cup/text on the test logo while cutting shape count (and file size) ~half.
+      const traceMinArea = Math.max(2, Math.round(workingWidth * workingHeight * 5e-6));
       const pathData = traceAllColors(
         traceLabels,
         workingWidth,
@@ -131,10 +138,12 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         finalPalette,
         selectedSet,
         smoothness,
-        0,
+        traceMinArea,
         (p) => postProgress(0.6 + p * 0.3, 'Tracing shapes...'),
         qualityLevel,
-        finalMask
+        finalMask,
+        true,          // mergeNeighbors
+        scaleFactor    // scale RDP tolerance to the upscaled trace resolution
       );
 
       postProgress(0.95, 'Generating SVG...');
@@ -143,45 +152,11 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       self.postMessage({
         type: 'complete',
         palette: finalPalette,
-        quantizedData: Array.from(nativeLabels),
         pathData,
         svgContent,
         width: origWidth,
         height: origHeight
       } as WorkerResponse);
-
-    } else if (type === 'regenerate' && palette && quantizedData) {
-      const { smoothness, minArea, removeBackground, hasTransparentSource, selectedColors, qualityLevel = 'balanced' } = settings;
-
-      const width = e.data.imageData?.width || 0;
-      const height = e.data.imageData?.height || 0;
-
-      postProgress(0.3, 'Regenerating...');
-
-      let quantized = new Uint8Array(quantizedData);
-
-      if (minArea > 0) {
-        quantized = adaptiveClean(quantized, width, height, palette.length, minArea, qualityLevel) as Uint8Array;
-      }
-
-      const selectedSet = new Set(selectedColors);
-
-      const pathData = traceAllColors(
-        quantized,
-        width,
-        height,
-        palette,
-        selectedSet,
-        smoothness,
-        0,
-        (p) => postProgress(0.3 + p * 0.6, 'Regenerating...'),
-        qualityLevel,
-        null
-      );
-
-      const svgContent = generateSvg(pathData, width, height, removeBackground, 1, hasTransparentSource);
-
-      self.postMessage({ type: 'complete', pathData, svgContent } as WorkerResponse);
     }
   } catch (error) {
     console.error('Worker error:', error);

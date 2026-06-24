@@ -272,10 +272,17 @@ export function medianCutQuantization(
   }
 
   // BOOST EDGE COLORS: Sample colors from high-contrast edges (text, fine details)
-  // This helps preserve text colors that might otherwise be underrepresented
-  const edgeStep = Math.max(1, Math.floor(totalPixels / 30000));
-  for (let y = 1; y < height - 1; y += Math.max(1, Math.floor(edgeStep / width))) {
-    for (let x = 1; x < width - 1; x += 2) {
+  // This helps preserve text colors that might otherwise be underrepresented.
+  // Use independent integer strides targeting ~TARGET_EDGE_SAMPLES probes. (The old
+  // row stride `floor((totalPixels/30000)/width)` = floor(height/30000) collapsed to
+  // 0 → 1 for every realistic image, so it scanned ~half of ALL pixels and pushed up
+  // to millions of colours into `colors`, ballooning the downstream k-means.)
+  const TARGET_EDGE_SAMPLES = 30000;
+  const edgeSide = Math.sqrt(TARGET_EDGE_SAMPLES); // ~173
+  const stepY = Math.max(1, Math.floor(height / edgeSide));
+  const stepX = Math.max(2, Math.floor(width / edgeSide));
+  for (let y = 1; y < height - 1; y += stepY) {
+    for (let x = 1; x < width - 1; x += stepX) {
       const idx = (y * width + x) * 4;
       const idxLeft = idx - 4;
       const idxRight = idx + 4;
@@ -408,44 +415,43 @@ export function denoiseQuantized(
   iterations: number = 1
 ): Uint8Array {
   let current = quantized;
-  
+  // Reusable tally indexed by colour value (0..255, incl. the 255 transparent marker).
+  // Avoids the old per-pixel `new Map()` — at 4096² that was 16.7M Map allocations per
+  // pass; this is allocation-free and several× faster.
+  const counts = new Uint16Array(256);
+
   for (let i = 0; i < iterations; i++) {
     const next = new Uint8Array(current.length);
-    
+
     for (let y = 0; y < height; y++) {
+      const y0 = y > 0 ? y - 1 : 0;
+      const y1 = y < height - 1 ? y + 1 : height - 1;
       for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        
-        // Collect neighbor counts
-        const counts = new Map<number, number>();
+        const x0 = x > 0 ? x - 1 : 0;
+        const x1 = x < width - 1 ? x + 1 : width - 1;
+
         let maxCount = 0;
-        let majorityColor = current[idx];
-        
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const ny = y + dy;
-            const nx = x + dx;
-            
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-              const nIdx = ny * width + nx;
-              const color = current[nIdx];
-              const newCount = (counts.get(color) || 0) + 1;
-              counts.set(color, newCount);
-              
-              if (newCount > maxCount) {
-                maxCount = newCount;
-                majorityColor = color;
-              }
-            }
+        let majorityColor = current[y * width + x];
+        for (let ny = y0; ny <= y1; ny++) {
+          const row = ny * width;
+          for (let nx = x0; nx <= x1; nx++) {
+            const c = current[row + nx];
+            const nc = ++counts[c];
+            if (nc > maxCount) { maxCount = nc; majorityColor = c; }
           }
         }
-        
-        next[idx] = majorityColor;
+        next[y * width + x] = majorityColor;
+
+        // Reset only the touched entries by re-walking the same window (cheap, no alloc).
+        for (let ny = y0; ny <= y1; ny++) {
+          const row = ny * width;
+          for (let nx = x0; nx <= x1; nx++) counts[current[row + nx]] = 0;
+        }
       }
     }
     current = next;
   }
-  
+
   return current;
 }
 
@@ -817,6 +823,17 @@ export function createForegroundMask(
         maxY = Math.max(maxY, y);
       }
     }
+  }
+
+  // Degenerate case: no subject seeds (e.g. a near-flat single-colour image, or all
+  // content quantised to the dominant edge colour). The sentinels stay at their
+  // init values, so the fill loops below would never run and we'd return an all-zero
+  // mask → traceAllColors would exclude EVERY pixel → a blank SVG. Fall back to an
+  // all-ones (permissive) mask so remove-background degrades to a no-op, not nothing.
+  if (maxX < minX || maxY < minY) {
+    const all = new Uint8Array(totalPixels);
+    all.fill(1);
+    return all;
   }
 
   // Step 6: Create shape mask using scanline fill

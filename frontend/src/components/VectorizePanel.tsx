@@ -24,7 +24,7 @@ function hasTransparency(d: ImageData): boolean {
 }
 
 export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string; title: string; onClose: () => void }) {
-  const { svgContent, progress, processImage } = useVectorizer();
+  const { svgContent, progress, error: workerError, processImage } = useVectorizer();
   const [quality, setQuality] = useState<QualityLevel>('high');
   const [colorCount, setColorCount] = useState(16); // detail-rich logos lose low-contrast features (text/icons) below ~16; flat logos collapse extras so it's safe
   const [smoothness, setSmoothness] = useState(5); // higher = smoother curves (below ~3 has little effect)
@@ -117,6 +117,10 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
 
   // A fresh conversion replaces the working copy and clears edit history.
   useEffect(() => { if (svgContent) { setWorking(svgContent); setHistory([]); } }, [svgContent]);
+
+  // Surface worker-side failures (the worker posts 'error'; otherwise the panel would
+  // just sit on "No result yet." with no explanation).
+  useEffect(() => { if (workerError) { setErr(workerError); setLoadingImg(false); } }, [workerError]);
 
   const onEdit = useCallback((next: string) => {
     setHistory((h) => [...h.slice(-49), working]);

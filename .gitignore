@@ -37,5 +37,5 @@ Thumbs.db
 .vscode/
 *.swp
 
-# temp vectoriser test harness (dev only)
-frontend/vectest_harness.*
+# temp vectoriser test harness + its render artifacts (dev only)
+frontend/vectest_*
