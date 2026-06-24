@@ -539,13 +539,13 @@ export function DesignStudio() {
               </span>
             </div>
             <form onSubmit={(e) => { e.preventDefault(); handleSendChat(); }} className="flex gap-2 items-end">
-              <textarea ref={chatInputRef} value={chatInput} rows={1}
+              <textarea ref={chatInputRef} value={chatInput} rows={2}
                 onChange={(e) => {
                   setChatInput(e.target.value);
-                  // Auto-grow up to ~3 lines.
+                  // Keep it ~2 lines tall, auto-grow up to ~6 lines.
                   const el = e.target as HTMLTextAreaElement;
                   el.style.height = 'auto';
-                  el.style.height = Math.min(el.scrollHeight, 96) + 'px';
+                  el.style.height = Math.max(68, Math.min(el.scrollHeight, 160)) + 'px';
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
