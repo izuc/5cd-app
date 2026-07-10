@@ -165,7 +165,15 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       // as one shape with one fitted gradient instead of a patchwork of flat bands.
       postProgress(0.578, 'Merging gradient bands...');
       const banded = mergeGradientBands(nativeLabels, origWidth, origHeight, processedData, finalPalette);
-      const mergedLabels = banded.labels;
+      // COVERAGE pass: any region still below the tracer's floor after
+      // thin-linking never got chained, and the tracer would drop it — leaving
+      // an uncovered hole in the plane tiling, visible as tiny white specks.
+      // Absorb those into their dominant neighbour regardless of contrast.
+      // The floor here must match the tracer's NATIVE-equivalent drop size
+      // exactly (not nativeFloor, which is slightly larger — using it absorbed
+      // high-contrast detail that was tracing fine).
+      const coverageFloor = Math.max(2, Math.round(origWidth * origHeight * 3e-6));
+      const mergedLabels = consolidateRegions(banded.labels, origWidth, origHeight, finalPalette, 0, coverageFloor, false);
 
       // Truer fills: recompute each palette entry as the mean of its actual pixels.
       // Uses the PRE-merge labels: band merging pools multi-shade pixels under one
@@ -207,11 +215,12 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       postProgress(0.6, 'Tracing shapes...');
       const selectedSet = new Set(selectedColors);
       // Drop sub-perceptual speckle regions (anti-alias dust along edges). Keyed to a
-      // fraction of the working area so it stays resolution-adaptive: aggressive on the
-      // high-res AI-upscaled trace (~4096px, where speckle explodes) and gentle on
-      // low-res sources. ~5e-6 ≈ a 4-5px blob at native res; verified not to touch the
-      // cup/text on the test logo while cutting shape count (and file size) ~half.
-      const traceMinArea = Math.max(2, Math.round(workingWidth * workingHeight * 5e-6));
+      // fraction of the working area so it stays resolution-adaptive. Set BELOW the
+      // coverage floor (×0.75) so every region the coverage pass kept definitely
+      // traces — bilinear upscaling wobbles a region's working-res pixel count by a
+      // few percent, and a region that survives coverage but drops at trace would
+      // leave an uncovered white speck.
+      const traceMinArea = Math.max(2, Math.round(workingWidth * workingHeight * 3e-6 * 0.75));
       const pathData = traceAllColors(
         traceLabels,
         workingWidth,

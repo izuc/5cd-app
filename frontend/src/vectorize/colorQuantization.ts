@@ -657,7 +657,8 @@ export function consolidateRegions(
   height: number,
   palette: Color[],
   baseArea: number = 20,
-  floorArea: number = 0
+  floorArea: number = 0,
+  exemptHighContrast: boolean = true // false = COVERAGE pass: absorb below floor regardless of contrast
 ): Uint8Array {
   // Scale thresholds with resolution so behaviour matches across source sizes
   // (tuned at ~1024²; a 2048² source has 4× the pixels per feature).
@@ -739,7 +740,11 @@ export function consolidateRegions(
         // thin-link pass downstream can chain back into continuous strokes.
         // Absorbing them recoloured hairlines into their surroundings — the
         // "dashed highlights" artefact. True dust (< 4 px) still always merges.
-        if (area <= absorbLimit(d) || (area < floorArea && (d < 120 || area < 4))) {
+        // The exemption is DISABLED for the post-link coverage pass: whatever
+        // is still below the floor by then never got linked, and the tracer
+        // would drop it — leaving an uncovered hole in the plane tiling that
+        // shows through as a white speck.
+        if (area <= absorbLimit(d) || (area < floorArea && (!exemptHighContrast || d < 120 || area < 4))) {
           for (const rIdx of regionIndices) result[rIdx] = bestColor;
         }
       }
