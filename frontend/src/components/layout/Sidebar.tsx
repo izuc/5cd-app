@@ -5,6 +5,7 @@ import { Icon } from '../Icon';
 const NAV_ITEMS = [
   { path: '/dashboard', icon: 'folder_open', label: 'My Designs' },
   { path: '/create', icon: 'dashboard_customize', label: 'New Design' },
+  { path: '/vectorize', icon: 'polyline', label: 'Vectorise' },
   { path: '/billing', icon: 'payments', label: 'Billing' },
   { path: '/settings', icon: 'settings', label: 'Settings' },
 ];

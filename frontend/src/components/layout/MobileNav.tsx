@@ -3,6 +3,7 @@ import { Icon } from '../Icon';
 
 const NAV_ITEMS = [
   { path: '/dashboard', icon: 'folder_open', label: 'Designs' },
+  { path: '/vectorize', icon: 'polyline', label: 'Vectorise' },
   { path: '/create', icon: 'auto_awesome', label: 'Create', isCreate: true },
   { path: '/billing', icon: 'payments', label: 'Billing' },
   { path: '/settings', icon: 'settings', label: 'Settings' },

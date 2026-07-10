@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { Icon } from '../components/Icon';
 import { usePageTitle } from '../hooks/usePageTitle';
@@ -232,6 +232,11 @@ export function CreateDesign() {
             ))}
           </div>
         </div>
+
+        <p className="text-center text-xs text-on-surface-variant">
+          Already have a logo or image?{' '}
+          <Link to="/vectorize" className="text-primary font-bold hover:underline">Vectorise it to SVG →</Link>
+        </p>
 
         <div className="flex flex-wrap gap-2 justify-center">
           {TYPE_OPTIONS.map((t) => (

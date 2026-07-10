@@ -132,6 +132,10 @@ export function Dashboard() {
               </Link>
             ))}
           </div>
+          <Link to="/vectorize" className="mt-6 inline-flex items-center gap-2 text-sm font-bold text-primary hover:underline">
+            <Icon name="polyline" className="text-base" /> Already have a logo or image? Vectorise it to a scalable SVG
+            <Icon name="arrow_forward" className="text-base" />
+          </Link>
         </section>
       )}
 
@@ -279,6 +283,11 @@ export function Dashboard() {
                 {action.label}
               </Link>
             ))}
+            <Link to="/vectorize"
+              className="inline-flex items-center gap-2 bg-primary-container/20 hover:bg-primary-container/30 px-4 py-2.5 rounded-xl text-sm font-headline font-bold transition-colors">
+              <Icon name="polyline" className="text-base text-primary" />
+              Vectorise an image
+            </Link>
           </div>
         </section>
       )}

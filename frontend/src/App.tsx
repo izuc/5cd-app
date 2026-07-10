@@ -8,6 +8,7 @@ import { Login } from './pages/Login';
 import { Register } from './pages/Register';
 import { Dashboard } from './pages/Dashboard';
 import { CreateDesign } from './pages/CreateDesign';
+import { VectorizeUpload } from './pages/VectorizeUpload';
 import { DesignStudio } from './pages/DesignStudio';
 import { ExportCheckout } from './pages/ExportCheckout';
 import { Billing } from './pages/Billing';
@@ -41,6 +42,7 @@ export default function App() {
           <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/create" element={<CreateDesign />} />
+            <Route path="/vectorize" element={<VectorizeUpload />} />
             <Route path="/studio/:projectId" element={<DesignStudio />} />
             <Route path="/export/:projectId" element={<ExportCheckout />} />
             <Route path="/billing" element={<Billing />} />
