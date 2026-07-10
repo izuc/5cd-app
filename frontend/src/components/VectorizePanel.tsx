@@ -87,12 +87,23 @@ export function VectorizePanel({ imageUrl, title, onClose }: { imageUrl: string;
       } else if (aiUpscale) {
         setLoadMsg('AI enlarging…');
         try {
-          const srcUrl = (await drawSource(MAX_SOURCE_AI)).toDataURL('image/png');
+          const srcCanvas = await drawSource(MAX_SOURCE_AI);
+          // Payload discipline: a 2048px canvas PNG data URL can exceed the
+          // backend's POST limit (~8M), which used to make this request die and
+          // silently fall back to the low-res path. JPEG at q0.92 is ~10x smaller
+          // and the upscaler cleans its artifacts anyway; PNG only when the source
+          // has transparency that must survive the round trip.
+          const alpha = hasTransparency(canvasToImageData(srcCanvas));
+          let srcUrl = alpha ? srcCanvas.toDataURL('image/png') : srcCanvas.toDataURL('image/jpeg', 0.92);
+          if (srcUrl.length > 6_000_000) {
+            srcUrl = alpha ? (await drawSource(MAX_SOURCE)).toDataURL('image/png') : srcCanvas.toDataURL('image/jpeg', 0.85);
+          }
           const up = await api.upscale(srcUrl, 2048); // 4x model, capped to 2048
           data = await dataUrlToImageData(up.image);
           didUpscale = true;
-        } catch {
+        } catch (upErr) {
           // Upscaler unavailable — fall back to the original so vectorise still works.
+          console.warn('AI upscale failed — tracing at original resolution.', upErr);
           data = canvasToImageData(await drawSource(MAX_SOURCE));
         }
         cacheRef.current = { key: cacheKey, data, upscaled: didUpscale };

@@ -57,6 +57,11 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [view, setView] = useState<View | null>(null); // null = fit whole viewBox
   const [moveDelta, setMoveDelta] = useState<{ dx: number; dy: number } | null>(null);
+  // Ref mirror of moveDelta: pointermove and pointerup can arrive in the same React
+  // batch (fast flicks, synthetic events), where the up-handler's closure still sees
+  // the previous state. The ref is updated synchronously so the commit never uses a
+  // stale delta.
+  const moveDeltaRef = useRef<{ dx: number; dy: number } | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const ptrs = useRef(new Map<number, { x: number; y: number }>());
@@ -68,6 +73,13 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
     | { type: 'move'; ids: string[]; start: { x: number; y: number } }
   >(null);
   const moved = useRef(false); // suppress click-to-deselect after a drag gesture
+
+  // Pointer capture keeps fast drags delivering events when the cursor leaves the
+  // canvas — but it THROWS if the pointer is no longer active (pen/touch races,
+  // synthetic events). Losing capture is benign; losing the whole gesture isn't.
+  const capture = (el: Element | null | undefined, pointerId: number) => {
+    try { el?.setPointerCapture(pointerId); } catch { /* pointer already gone */ }
+  };
 
   const { doc, svgEl, vb, elements } = useMemo(() => {
     const d = new DOMParser().parseFromString(svg, 'image/svg+xml');
@@ -242,17 +254,17 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
       };
       setDrag(null);
       setMoveDelta(null);
-      e.currentTarget.setPointerCapture(e.pointerId);
+      capture(e.currentTarget, e.pointerId);
       return;
     }
 
     if (e.button === 1 || tool === 'pan') {
       gesture.current = { type: 'pan', start: { x: e.clientX, y: e.clientY }, startView: { ...v } };
-      e.currentTarget.setPointerCapture(e.pointerId);
+      capture(e.currentTarget, e.pointerId);
       return;
     }
     if (tool === 'rect') {
-      e.currentTarget.setPointerCapture(e.pointerId);
+      capture(e.currentTarget, e.pointerId);
       const c = toCoords(e.clientX, e.clientY);
       setDrag({ x0: c.x, y0: c.y, x1: c.x, y1: c.y });
       if (!e.shiftKey) setSelected(new Set());
@@ -285,14 +297,16 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
         const ids = selected.has(g.id) ? [...selected] : [g.id];
         if (!selected.has(g.id)) setSelected(new Set([g.id]));
         gesture.current = { type: 'move', ids, start: g.start };
-        svgRef.current?.setPointerCapture(e.pointerId);
+        capture(svgRef.current, e.pointerId);
         moved.current = true;
       }
       return;
     }
     if (g?.type === 'move') {
       const sc = clientScale();
-      setMoveDelta({ dx: (e.clientX - g.start.x) * sc, dy: (e.clientY - g.start.y) * sc });
+      const d = { dx: (e.clientX - g.start.x) * sc, dy: (e.clientY - g.start.y) * sc };
+      moveDeltaRef.current = d;
+      setMoveDelta(d);
       moved.current = true;
       return;
     }
@@ -308,7 +322,9 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
     if (g?.type === 'maybe-move') { gesture.current = null; return; }
     if (g?.type === 'move') {
       gesture.current = null;
-      if (moveDelta && (Math.abs(moveDelta.dx) > 0.01 || Math.abs(moveDelta.dy) > 0.01)) moveIds(g.ids, moveDelta.dx, moveDelta.dy);
+      const d = moveDeltaRef.current;
+      if (d && (Math.abs(d.dx) > 0.01 || Math.abs(d.dy) > 0.01)) moveIds(g.ids, d.dx, d.dy);
+      moveDeltaRef.current = null;
       setMoveDelta(null);
       return;
     }

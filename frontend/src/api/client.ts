@@ -81,8 +81,12 @@ export const api = {
   aiConfig: () =>
     request<{ engine: string; label: string; enabled: boolean; max_side: number; default_size: string; steps: number; supports_edit: boolean; supports_upscale?: boolean }>('/ai-config'),
   // AI super-resolution (Real-ESRGAN) — used by the vectoriser for a cleaner trace.
+  // The worker returns BARE base64 (no data: prefix); normalise so callers can put
+  // it straight into an <img src> — without this the decode fails and the vectoriser
+  // silently fell back to the low-res no-upscale path.
   upscale: (image: string, max_dim?: number) =>
-    request<{ image: string; width: number; height: number }>('/upscale', { method: 'POST', body: JSON.stringify({ image, max_dim }) }),
+    request<{ image: string; width: number; height: number }>('/upscale', { method: 'POST', body: JSON.stringify({ image, max_dim }) })
+      .then((r) => ({ ...r, image: r.image.startsWith('data:') ? r.image : `data:image/png;base64,${r.image}` })),
   // Rewrite a short prompt into a detailed brief via the Qwen3 text encoder.
   expandPrompt: (prompt: string, design_type?: string) =>
     request<{ prompt: string; expanded: string }>('/expand-prompt', { method: 'POST', body: JSON.stringify({ prompt, design_type }) }),
