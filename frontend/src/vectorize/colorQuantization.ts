@@ -1684,15 +1684,21 @@ export function mergeGradientBands(
     // Blob-into-field only (smaller side bounded): fusing two LARGE soft fields
     // is where photos lose fidelity — a big pooled union renders flatter than
     // the two fields it replaced. Texture blobs are small-to-mid by nature.
+    // Tier 2 lifts the size cap for NEAR-IDENTICAL shades over an ultra-smooth
+    // boundary with a tight residual — residual sky/field banding melts and the
+    // bounded error (≤18 units, tight rms) cannot visibly flatten anything.
+    const tier1 = d <= 35 && smoothFrac >= 0.75 && Math.min(rn[ra], rn[rb]) <= 2500
+      && colorDistance(rootMean(ra), rootMean(rb)) <= 35;
+    const tier2 = d <= 18 && smoothFrac >= 0.85
+      && colorDistance(rootMean(ra), rootMean(rb)) <= 18;
     let texturePool = false;
-    if (d <= 35 && smoothFrac >= 0.75 && Math.min(rn[ra], rn[rb]) <= 2500
-      && colorDistance(rootMean(ra), rootMean(rb)) <= 35) {
+    if (tier1 || tier2) {
       const sPool = fitStats(rn[ra] + rn[rb], rsx[ra] + rsx[rb], rsy[ra] + rsy[rb], rsxx[ra] + rsxx[rb], rsyy[ra] + rsyy[rb], rsxy[ra] + rsxy[rb],
         [rsc[0][ra] + rsc[0][rb], rsc[1][ra] + rsc[1][rb], rsc[2][ra] + rsc[2][rb]],
         [rscx[0][ra] + rscx[0][rb], rscx[1][ra] + rscx[1][rb], rscx[2][ra] + rscx[2][rb]],
         [rscy[0][ra] + rscy[0][rb], rscy[1][ra] + rscy[1][rb], rscy[2][ra] + rscy[2][rb]],
         [rscc[0][ra] + rscc[0][rb], rscc[1][ra] + rscc[1][rb], rscc[2][ra] + rscc[2][rb]]);
-      texturePool = sPool.rms <= 16;
+      texturePool = tier1 ? sPool.rms <= 16 : sPool.rms <= 12;
     }
     // Thin-link: chain hairline fragments without plane-fit gates (a hairline's
     // spatial spread is degenerate, so the plane path can never merge them).

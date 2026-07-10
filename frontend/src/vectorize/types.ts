@@ -28,11 +28,12 @@ export interface ShapeGradient {
 
 export interface ShapeData {
   path: string;          // outer contour + any enclosed-hole subpaths
-  color: Color;
+  color: Color;          // the LABEL colour — identity for grouping/background logic
+  fillColor?: Color;     // this component's own (interior) mean — truer local paint
   area: number;
   isBackground: boolean;
   hasHoles?: boolean;    // true → path has hole subpaths and needs fill-rule=evenodd
-  gradient?: ShapeGradient; // present → fill with a linearGradient instead of the flat colour
+  gradient?: ShapeGradient; // present → fill with a gradient instead of the flat colour
 }
 
 export type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';

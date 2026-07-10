@@ -552,7 +552,15 @@ function contourToPath(
   let pts = boundary;
   if (qualityLevel !== 'fast') {
     const none = new Set<number>();
-    pts = smoothPathPreservingCorners(pts, none, qualityLevel === 'detailed' ? 1 : 2, qualityLevel === 'detailed' ? 0.1 : 0.2);
+    // THIN regions get extra position-smoothing: their simplify tolerance is
+    // deliberately capped tight (so the two sides can't collapse together),
+    // which means simplification never removes their boundary jitter — the
+    // hairline "wobble". Smoothing relaxes the jitter without any collapse
+    // risk because it averages positions rather than dropping points.
+    const thin = Number.isFinite(regionThickness) && regionThickness < 6;
+    const passes = qualityLevel === 'detailed' ? 1 : thin ? 4 : 2;
+    const weight = qualityLevel === 'detailed' ? 0.1 : thin ? 0.28 : 0.2;
+    pts = smoothPathPreservingCorners(pts, none, passes, weight);
   }
   pts = ensureClockwise(pts);
 
@@ -1033,6 +1041,9 @@ interface GradSums {
   scx: Float64Array;  // Σ channel · x
   scy: Float64Array;  // Σ channel · y
   scc: Float64Array;  // Σ channel²
+  // Interior-only colour sums (all 4-neighbours share the label) — boundary
+  // pixels are anti-alias blends and wash the component's own colour.
+  inN: number; inR: number; inG: number; inB: number;
 }
 
 // Fit a colour ramp to a component and decide whether a gradient fill is
@@ -1277,8 +1288,10 @@ export function traceAllColors(
   const gs: GradSums = {
     n: 0, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0,
     sc: new Float64Array(3), scx: new Float64Array(3), scy: new Float64Array(3), scc: new Float64Array(3),
+    inN: 0, inR: 0, inG: 0, inB: 0,
   };
-  const gradAccum = (px: number, py: number) => {
+  let curColor = -1; // label being traced — for the interiority test in gradAccum
+  const gradAccum = (px: number, py: number, idx: number) => {
     if (px % sfi !== 0 || py % sfi !== 0) return;
     const gx = px / sfi, gy = py / sfi;
     const si = gy * sourceWidth + gx;
@@ -1289,16 +1302,26 @@ export function traceAllColors(
       const v = sourceRgba![si * 4 + ch];
       gs.sc[ch] += v; gs.scx[ch] += v * gx; gs.scy[ch] += v * gy; gs.scc[ch] += v * v;
     }
+    if (px > 0 && px < width - 1 && py > 0 && py < height - 1 &&
+        quantized[idx - 1] === curColor && quantized[idx + 1] === curColor &&
+        quantized[idx - width] === curColor && quantized[idx + width] === curColor) {
+      gs.inN++;
+      gs.inR += sourceRgba![si * 4];
+      gs.inG += sourceRgba![si * 4 + 1];
+      gs.inB += sourceRgba![si * 4 + 2];
+    }
   };
   const gradReset = () => {
     gs.n = 0; gs.sx = 0; gs.sy = 0; gs.sxx = 0; gs.syy = 0; gs.sxy = 0;
     gs.sc.fill(0); gs.scx.fill(0); gs.scy.fill(0); gs.scc.fill(0);
+    gs.inN = 0; gs.inR = 0; gs.inG = 0; gs.inB = 0;
   };
 
   // Process each color separately with optional merging
   for (const colorIndex of colorsToTrace) {
     // Skip invalid indices and transparent marker (255)
     if (colorIndex >= palette.length || colorIndex === 255) continue;
+    curColor = colorIndex;
 
     // Create a binary mask for this color, tracking its pixel bounding box so the
     // (expensive) morphological closing only touches this colour's footprint.
@@ -1363,7 +1386,7 @@ export function traceAllColors(
             if (foregroundMask && foregroundMask[idx] === 1) {
               foregroundPixelCount++;
             }
-            if (doGrad) gradAccum(x, y);
+            if (doGrad) gradAccum(x, y, idx);
           }
 
           while (stack.length > 0) {
@@ -1397,7 +1420,7 @@ export function traceAllColors(
                      if (foregroundMask && foregroundMask[nIdx] === 1) {
                        foregroundPixelCount++;
                      }
-                     if (doGrad) gradAccum(nx, ny);
+                     if (doGrad) gradAccum(nx, ny, nIdx);
                    }
                    stack.push(nIdx);
                  }
@@ -1498,8 +1521,20 @@ export function traceAllColors(
             ? fitShapeGradient(gs, gradSamples, gradT, sourceRgba!, sourceWidth)
             : undefined;
 
+          // This component's own colour (interior mean — boundary pixels are AA
+          // blends): truer than the label's global mean, which averages every
+          // component of the label across the whole image. Label colour stays
+          // as the shape's identity for grouping/background decisions.
+          let fillColor: Color | undefined;
+          if (doGrad && gs.inN >= 30) {
+            fillColor = { r: Math.round(gs.inR / gs.inN), g: Math.round(gs.inG / gs.inN), b: Math.round(gs.inB / gs.inN), a: 255 };
+          } else if (doGrad && gs.n >= 30) {
+            fillColor = { r: Math.round(gs.sc[0] / gs.n), g: Math.round(gs.sc[1] / gs.n), b: Math.round(gs.sc[2] / gs.n), a: 255 };
+          }
+
           result.push({
             color: palette[colorIndex],
+            fillColor,
             path: pathStr,
             area: pixelCount,
             isBackground,
@@ -1660,7 +1695,7 @@ export function generateSvg(
     // Include foreground shapes + small background shapes (interior details like letter holes)
 
     const smallShapeThreshold = width * height * 0.05; // 5% of image area
-    type FShape = { hex: string; path: string; area: number; hasHoles?: boolean; gradient?: ShapeGradient };
+    type FShape = { hex: string; fillHex: string; path: string; area: number; hasHoles?: boolean; gradient?: ShapeGradient };
     const drawn: FShape[] = [];
 
     for (const shape of shapes) {
@@ -1675,7 +1710,7 @@ export function generateSvg(
 
       const isSmallBackground = shape.isBackground && shape.area < smallShapeThreshold;
       if (!shape.isBackground || (isSmallBackground && !isDominantBg)) {
-        drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles, gradient: shape.gradient });
+        drawn.push({ hex, fillHex: colorToHex(shape.fillColor || shape.color), path: shape.path, area: shape.area, hasHoles: shape.hasHoles, gradient: shape.gradient });
       }
     }
 
@@ -1683,7 +1718,7 @@ export function generateSvg(
     if (drawn.length === 0) {
       for (const shape of shapes) {
         const hex = colorToHex(shape.color);
-        if (hex !== dominantHex) drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles, gradient: shape.gradient });
+        if (hex !== dominantHex) drawn.push({ hex, fillHex: colorToHex(shape.fillColor || shape.color), path: shape.path, area: shape.area, hasHoles: shape.hasHoles, gradient: shape.gradient });
       }
     }
 
@@ -1697,10 +1732,11 @@ export function generateSvg(
     for (const s of drawn) {
       const d = scalePathString(s.path, pathScale);
       const fillRule = s.hasHoles ? ' fill-rule="evenodd"' : '';
-      const p = paintFor(s.hex, s.gradient);
-      // data-c carries the flat label colour for gradient shapes so the editor's
-      // colour rail can still group/select/recolour them by colour.
-      const dataC = s.gradient ? ` data-c="${s.hex}"` : '';
+      const p = paintFor(s.fillHex, s.gradient);
+      // data-c carries the LABEL colour whenever the paint differs from it
+      // (gradient or per-component fill) so the editor's colour rail can still
+      // group/select/recolour shapes by colour.
+      const dataC = s.gradient || s.fillHex !== s.hex ? ` data-c="${s.hex}"` : '';
       svg += `      <path fill="${p}"${fillRule}${dataC} stroke="${p}" stroke-width="${strokeWidth}" stroke-linejoin="round" d="${d}"/>\n`;
     }
     svg += `    </g>\n`;
@@ -1710,12 +1746,13 @@ export function generateSvg(
     // This ensures large background shapes are drawn first, then smaller details on top
 
     // Collect ALL individual shapes with their colors and areas
-    const allShapesFlat: Array<{ hex: string; path: string; area: number; hasHoles?: boolean; gradient?: ShapeGradient }> = [];
+    const allShapesFlat: Array<{ hex: string; fillHex: string; path: string; area: number; hasHoles?: boolean; gradient?: ShapeGradient }> = [];
 
     for (const shape of shapes) {
       const hex = colorToHex(shape.color);
       allShapesFlat.push({
         hex,
+        fillHex: colorToHex(shape.fillColor || shape.color),
         path: shape.path,
         area: shape.area,
         hasHoles: shape.hasHoles,
@@ -1735,12 +1772,12 @@ export function generateSvg(
     // hairline-only and a hairline bridge is all that's needed.
     const strokeWidthStd = Math.max(1, Math.min(width, height) * 0.0006);
     svg += `    <g id="shapes-layer">\n`;
-    for (const { hex, path, hasHoles, gradient } of allShapesFlat) {
+    for (const { hex, fillHex, path, hasHoles, gradient } of allShapesFlat) {
       const scaledPath = scalePathString(path, pathScale);
       const fillRule = hasHoles ? ' fill-rule="evenodd"' : '';
-      const p = paintFor(hex, gradient);
-      // data-c: flat label colour for the editor's colour rail (see remove-bg branch).
-      const dataC = gradient ? ` data-c="${hex}"` : '';
+      const p = paintFor(fillHex, gradient);
+      // data-c: label colour for the editor's colour rail (see remove-bg branch).
+      const dataC = gradient || fillHex !== hex ? ` data-c="${hex}"` : '';
       svg += `      <path fill="${p}"${fillRule}${dataC} stroke="${p}" stroke-width="${strokeWidthStd}" stroke-linejoin="round" d="${scaledPath}"/>\n`;
     }
     svg += `    </g>\n`;
