@@ -20,7 +20,7 @@ text-to-image generation and image editing — "prompt → image → chat to ref
 - **Backend**: PHP 8.1+ with Slim 4, PDO/MySQL.
 - **Frontend**: React 18 + Vite 6 + Tailwind 3.
 - **Database**: MySQL 8.4.7 — root user, no password (matches the local dev setup).
-- **Default ports**: backend `8081`, AI service `8090`, Vite dev server `5180`.
+- **Default ports**: backend `8082` (matches the Vite proxy), AI service `8090`, Vite dev server `5180`.
 
 ## Setup
 
@@ -38,7 +38,8 @@ cd backend
 composer install
 copy .env.example .env
 # adjust JWT_SECRET if you want
-php -S 127.0.0.1:8081 -t public
+# Raised limits: the layered editor uploads multi-MB base64 layer bitmaps.
+php -d post_max_size=64M -d memory_limit=512M -S 127.0.0.1:8082 -t public
 ```
 
 ### 3. AI service (FLUX.2-klein-4B)

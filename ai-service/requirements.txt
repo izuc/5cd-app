@@ -25,6 +25,11 @@ gguf>=0.10.0
 bitsandbytes>=0.45
 # AI upscaler (Real-ESRGAN-class models) for the vectoriser.
 spandrel>=0.4
+# Background removal for transparent layer generation (CPU onnxruntime — no
+# VRAM contention with FLUX). If absent, the worker degrades to a white-key
+# matte automatically.
+rembg>=2.0
+onnxruntime>=1.17
 
 # HF hub for downloads
 huggingface-hub>=0.25

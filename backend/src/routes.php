@@ -9,6 +9,7 @@ use App\Middleware\AuthMiddleware;
 use App\Controllers\AuthController;
 use App\Controllers\ProjectController;
 use App\Controllers\GenerationController;
+use App\Controllers\EditorController;
 use App\Controllers\ExportController;
 use App\Controllers\CreditController;
 use App\Controllers\UserController;
@@ -35,7 +36,14 @@ return function (App $app) {
             $projects->post('/{id}/generate', [GenerationController::class, 'generate']);
             $projects->post('/{id}/edit', [GenerationController::class, 'edit']);
             $projects->get('/{id}/generations', [GenerationController::class, 'listForProject']);
+            $projects->post('/{id}/generations/composite', [GenerationController::class, 'createComposite']);
             $projects->post('/{id}/generations/{genId}/choose', [GenerationController::class, 'chooseGeneration']);
+
+            // Layered editor: document persistence + ephemeral layer AI jobs.
+            $projects->get('/{id}/editor', [EditorController::class, 'getDocument']);
+            $projects->put('/{id}/editor', [EditorController::class, 'saveDocument']);
+            $projects->post('/{id}/layers/edit', [EditorController::class, 'layerEdit']);
+            $projects->post('/{id}/layers/generate', [EditorController::class, 'layerGenerate']);
 
             $projects->post('/{id}/export', [ExportController::class, 'create']);
         })->add(new AuthMiddleware());

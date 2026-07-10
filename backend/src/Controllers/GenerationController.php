@@ -256,7 +256,19 @@ class GenerationController
         $stmt->execute([$jobId, $userId]);
         $row = $stmt->fetch();
         if (!$row) {
-            return $this->json($response, ['job_id' => $jobId, 'status' => 'unknown', 'progress' => 0], 404);
+            // Ephemeral layer-editor jobs are tracked in ai_jobs instead of
+            // projects.ai_job_id (so checkAndSaveJob never claims them).
+            $owned = false;
+            try {
+                $stmt = $db->prepare('SELECT job_id FROM ai_jobs WHERE job_id = ? AND user_id = ?');
+                $stmt->execute([$jobId, $userId]);
+                $owned = (bool) $stmt->fetch();
+            } catch (\Throwable $e) {
+                // Table may not exist on a not-yet-migrated DB — treat as unowned.
+            }
+            if (!$owned) {
+                return $this->json($response, ['job_id' => $jobId, 'status' => 'unknown', 'progress' => 0], 404);
+            }
         }
 
         $url = $this->aiUrl() . '/api/jobs/' . rawurlencode($jobId);
@@ -275,6 +287,106 @@ class GenerationController
             return $response->withHeader('Content-Type', 'application/json');
         }
         return $this->json($response, ['job_id' => $jobId, 'status' => 'unknown', 'progress' => 0]);
+    }
+
+    /**
+     * Save a client-flattened layer composite as a new generation so the
+     * version rail, thumbnails and export all see the layered work. Alpha-safe:
+     * bytes are written raw (no GD re-encode) unless a downscale is needed.
+     */
+    public function createComposite(Request $request, Response $response, array $args): Response
+    {
+        $userId = $request->getAttribute('userId');
+        $projectId = (int) $args['id'];
+        $data = $request->getParsedBody() ?? [];
+
+        $db = Database::getConnection();
+        $stmt = $db->prepare('SELECT id, chosen_generation_id FROM projects WHERE id = ? AND user_id = ?');
+        $stmt->execute([$projectId, $userId]);
+        $project = $stmt->fetch();
+        if (!$project) {
+            return $this->json($response, ['error' => true, 'message' => 'Project not found'], 404);
+        }
+
+        $b64 = (string) ($data['image_b64'] ?? '');
+        if (preg_match('/^data:image\/[a-z+.-]+;base64,/i', $b64, $m)) {
+            $b64 = substr($b64, strlen($m[0]));
+        }
+        $bytes = base64_decode($b64, true);
+        if ($bytes === false || $bytes === '' || strlen($bytes) > 12582912) {
+            return $this->json($response, ['error' => true, 'message' => 'image_b64 must be base64 PNG data (max 12MB).'], 400);
+        }
+        $info = @getimagesizefromstring($bytes);
+        if ($info === false || ($info[2] ?? 0) !== IMAGETYPE_PNG) {
+            return $this->json($response, ['error' => true, 'message' => 'Composite must be a PNG.'], 400);
+        }
+        [$width, $height] = [(int) $info[0], (int) $info[1]];
+
+        // Downscale oversized composites with GD, preserving alpha (the upload
+        // path's imagepng() without imagesavealpha would flatten it).
+        $maxSide = 2048;
+        if ($width > $maxSide || $height > $maxSide) {
+            $src = imagecreatefromstring($bytes);
+            if ($src === false) {
+                return $this->json($response, ['error' => true, 'message' => 'Could not decode image.'], 400);
+            }
+            imagepalettetotruecolor($src);
+            $scale = min($maxSide / $width, $maxSide / $height);
+            $nw = max(1, (int) floor($width * $scale));
+            $nh = max(1, (int) floor($height * $scale));
+            $dst = imagecreatetruecolor($nw, $nh);
+            imagealphablending($dst, false);
+            imagesavealpha($dst, true);
+            imagefill($dst, 0, 0, imagecolorallocatealpha($dst, 0, 0, 0, 127));
+            imagecopyresampled($dst, $src, 0, 0, 0, 0, $nw, $nh, $width, $height);
+            ob_start();
+            imagepng($dst);
+            $bytes = (string) ob_get_clean();
+            imagedestroy($src);
+            imagedestroy($dst);
+            [$width, $height] = [$nw, $nh];
+        }
+
+        $prompt = trim((string) ($data['prompt'] ?? '')) ?: 'Layer editor composite';
+        $parentId = (int) ($project['chosen_generation_id'] ?? 0) ?: null;
+
+        $projectDir = $this->uploadsDir() . '/projects/' . $projectId;
+        if (!is_dir($projectDir)) {
+            mkdir($projectDir, 0755, true);
+        }
+
+        // kind='edit' keeps the lineage/version rail working without an ENUM
+        // migration; model='editor' discriminates composites from AI edits.
+        $insert = $db->prepare(
+            'INSERT INTO generations (project_id, parent_generation_id, prompt, model, kind, output_image_url, width, height, is_chosen, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NOW())'
+        );
+        $insert->execute([$projectId, $parentId, $prompt, 'editor', 'edit', '', $width, $height]);
+        $genId = (int) $db->lastInsertId();
+
+        $filename = 'generation_' . $genId . '_' . bin2hex(random_bytes(4)) . '.png';
+        if (file_put_contents($projectDir . '/' . $filename, $bytes) === false) {
+            $db->prepare('DELETE FROM generations WHERE id = ?')->execute([$genId]);
+            return $this->json($response, ['error' => true, 'message' => 'Failed to store composite.'], 500);
+        }
+        $publicUrl = '/uploads/projects/' . $projectId . '/' . $filename;
+        $db->prepare('UPDATE generations SET output_image_url = ? WHERE id = ?')->execute([$publicUrl, $genId]);
+
+        // Promote to chosen so export/thumbnails reflect the saved version.
+        $db->prepare('UPDATE generations SET is_chosen = 0 WHERE project_id = ?')->execute([$projectId]);
+        $db->prepare('UPDATE generations SET is_chosen = 1 WHERE id = ?')->execute([$genId]);
+        $db->prepare('UPDATE projects SET chosen_generation_id = ?, status = ?, updated_at = NOW() WHERE id = ?')
+            ->execute([$genId, 'editing', $projectId]);
+
+        $stmt = $db->prepare(
+            'SELECT id, project_id, parent_generation_id, prompt, model, kind, output_image_url, width, height, is_chosen, created_at
+             FROM generations WHERE id = ?'
+        );
+        $stmt->execute([$genId]);
+        $gen = $stmt->fetch() ?: [];
+        $gen['is_chosen'] = (bool) ($gen['is_chosen'] ?? true);
+
+        return $this->json($response, ['generation' => $gen], 201);
     }
 
     /** Poll the AI service for the project's current job and persist any results. */

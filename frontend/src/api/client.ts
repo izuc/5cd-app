@@ -104,6 +104,30 @@ export const api = {
   chooseGeneration: (projectId: number, genId: number) =>
     request<{ message: string; generation_id: number }>(`/projects/${projectId}/generations/${genId}/choose`, { method: 'POST', body: JSON.stringify({}) }),
 
+  // -- Layered editor --------------------------------------------------
+  // The editor document is opaque JSON to the server except layers[].id and
+  // layers[].bitmap_url; `bitmaps` carries only DIRTY layer bitmaps (bare
+  // base64 PNG) — the server writes them and returns the doc with fresh URLs.
+  getEditorDoc: (projectId: number) =>
+    request<{ document: any | null; updated_at: string | null }>(`/projects/${projectId}/editor`),
+  saveEditorDoc: (projectId: number, document: any, bitmaps: Record<string, string>) =>
+    request<{ document: any; updated_at: string }>(`/projects/${projectId}/editor`, {
+      method: 'PUT',
+      body: JSON.stringify({ document, bitmaps }),
+    }),
+  // Ephemeral layer AI jobs: results come back through getJobStatus as base64
+  // and never become generations — the frontend places them onto the layer.
+  layerEdit: (projectId: number, data: { prompt: string; image_b64: string; transparent?: boolean; guidance_scale?: number; steps?: number; seed?: number }) =>
+    request<{ job_id: string; status: string }>(`/projects/${projectId}/layers/edit`, { method: 'POST', body: JSON.stringify(data) }),
+  layerGenerate: (projectId: number, data: { prompt: string; width?: number; height?: number; transparent?: boolean; seed?: number; steps?: number; guidance_scale?: number }) =>
+    request<{ job_id: string; status: string }>(`/projects/${projectId}/layers/generate`, { method: 'POST', body: JSON.stringify(data) }),
+  // Save a client-flattened composite as a new generation in the version lineage.
+  saveComposite: (projectId: number, image_b64: string, prompt?: string) =>
+    request<{ generation: Generation }>(`/projects/${projectId}/generations/composite`, {
+      method: 'POST',
+      body: JSON.stringify({ image_b64, prompt }),
+    }),
+
   // -- Exports / Credits / User --------------------------------------
   exportProject: (projectId: number, format: string) =>
     request<{ export: any }>(`/projects/${projectId}/export`, { method: 'POST', body: JSON.stringify({ format }) }),

@@ -5,12 +5,21 @@ import { Icon } from '../components/Icon';
 import { VectorizePanel } from '../components/VectorizePanel';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useAuthStore } from '../store/authStore';
+import { StudioEditor } from '../editor/components/StudioEditor';
+import { LayersPanel } from '../editor/components/LayersPanel';
+import { AiScopeBar } from '../editor/components/AiScopeBar';
+import { AiLayerProgress } from '../editor/components/AiLayerProgress';
+import { useEditorStore } from '../editor/editorStore';
+import { useAiActions } from '../editor/hooks/useAiActions';
+import { flattenDoc } from '../editor/lib/compose';
+import { saveEditorDocNow } from '../editor/lib/persist';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
   text: string;
   imageUrl?: string;
   loading?: boolean;
+  kind?: 'batch'; // renders the live per-layer AI progress card
 }
 
 export function DesignStudio() {
@@ -29,7 +38,13 @@ export function DesignStudio() {
   const [progress, setProgress] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [confirmSwitch, setConfirmSwitch] = useState<Generation | null>(null);
   const [showVectorize, setShowVectorize] = useState(false);
+  const [vectorizeUrl, setVectorizeUrl] = useState('');
+  const editorSaveState = useEditorStore((s) => s.saveState);
+  const editorDirty = useEditorStore((s) => s.dirtyDoc || s.dirtyLayerIds.size > 0);
+  const editorHasDoc = useEditorStore((s) => !!s.doc);
+  const ai = useAiActions(projectId ? parseInt(projectId) : null);
   const initialKickRef = useRef(false);
   const autoChosenRef = useRef(false);
   const jobSeenRef = useRef(false);
@@ -215,8 +230,16 @@ export function DesignStudio() {
     return () => { cancelled = true; };
   }, [projectId, project?.ai_job_id]);
 
-  const handleChoose = async (gen: Generation) => {
+  const handleChoose = async (gen: Generation, force = false) => {
     if (!projectId || busy) return;
+    // Switching versions replaces the editor's layer stack — confirm when the
+    // current document has unsaved layer work on a different base.
+    const ed = useEditorStore.getState();
+    if (!force && ed.doc && ed.doc.baseGenerationId !== gen.id && (ed.dirtyDoc || ed.layers.length > 1)) {
+      setConfirmSwitch(gen);
+      return;
+    }
+    setConfirmSwitch(null);
     setChosen(gen);
     setGenerations((prev) => prev.map((g) => ({ ...g, is_chosen: g.id === gen.id })));
     try {
@@ -226,19 +249,141 @@ export function DesignStudio() {
     }
   };
 
+  // Flatten the layer stack and store it as a new generation in the version
+  // lineage (thumbnails, export and vectorise all read the chosen generation).
+  const handleSaveVersion = async () => {
+    if (!projectId || busy) return;
+    const ed = useEditorStore.getState();
+    if (!ed.doc) return;
+    setBusy(true);
+    setError('');
+    try {
+      const canvas = await flattenDoc(ed.doc, ed.layers);
+      const b64 = canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+      const res = await api.saveComposite(parseInt(projectId), b64, 'Layer editor composite');
+      // Re-anchor the doc BEFORE chosen changes so the editor doesn't re-seed
+      // (layers stay editable; only the lineage anchor moves).
+      useEditorStore.getState().setBaseGenerationId(res.generation.id);
+      await saveEditorDocNow();
+      const list = await api.listGenerations(parseInt(projectId));
+      setGenerations(list.generations || []);
+      const ng = (list.generations || []).find((g) => g.id === res.generation.id) || res.generation;
+      setChosen(ng);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save version');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVectorize = async () => {
+    const ed = useEditorStore.getState();
+    if (ed.doc && (ed.layers.length > 1 || ed.dirtyDoc || ed.dirtyLayerIds.size > 0)) {
+      // Trace what's actually on screen (layers included). Transparent
+      // background so a design with alpha doesn't grow a solid white backdrop.
+      const canvas = await flattenDoc(ed.doc, ed.layers, { background: 'transparent' });
+      setVectorizeUrl(canvas.toDataURL('image/png'));
+    } else if (chosen) {
+      // Pristine single-layer doc: pass the original file through untouched
+      // (keeps source alpha and skips building a multi-MB data URL).
+      setVectorizeUrl(chosen.output_image_url + '?t=' + chosen.id);
+    } else {
+      return;
+    }
+    setShowVectorize(true);
+  };
+
+  const replaceLastChat = (msg: ChatMsg) => setChatMessages((prev) => [...prev.slice(0, -1), msg]);
+
   const handleSendChat = async () => {
     if (!projectId || !chosen || !chatInput.trim() || busy) return;
     const msg = chatInput.trim();
+    const scope = editorHasDoc ? useEditorStore.getState().aiScope : 'image';
     setChatInput('');
     setBusy(true);
+
+    // -- Layer-scoped flows (results land on layers, not in the lineage) ----
+    if (scope === 'layer' || scope === 'new-layer') {
+      setChatMessages((prev) => [...prev, { role: 'user', text: msg }, { role: 'assistant', text: '', loading: true }]);
+      try {
+        if (scope === 'layer') {
+          const sel = useEditorStore.getState().selectedLayerId;
+          if (!sel) throw new Error('Select a layer first (click one on the canvas or in the Layers panel).');
+          const r = await ai.editSingleLayer(sel, msg, editStrength);
+          replaceLastChat({
+            role: 'assistant',
+            text: `Done — updated the “${r.name}” layer.${r.converted ? ' (Converted the text layer to paint first.)' : ''}`,
+            imageUrl: r.thumb,
+          });
+        } else {
+          const r = await ai.generateNewLayer(msg);
+          replaceLastChat({
+            role: 'assistant',
+            text: `Added a new layer “${r.name}” — drag it into place, resize or rotate it.`,
+            imageUrl: r.thumb,
+          });
+        }
+      } catch (err: any) {
+        replaceLastChat({ role: 'assistant', text: err?.message || 'AI edit failed.' });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // -- Every layer separately, then recombine (layers stay separate) ------
+    if (scope === 'all-layers') {
+      setChatMessages((prev) => [...prev, { role: 'user', text: msg }, { role: 'assistant', text: '', kind: 'batch' }]);
+      try {
+        const sum = await ai.editAllLayers(msg, editStrength);
+        setChatMessages((prev) => [...prev, {
+          role: 'assistant',
+          text: `Edited ${sum.done} layer${sum.done === 1 ? '' : 's'}${sum.failed ? `, ${sum.failed} failed` : ''}${sum.skipped ? ` (${sum.skipped} skipped)` : ''}.`,
+        }]);
+      } catch (err: any) {
+        setChatMessages((prev) => [...prev, { role: 'assistant', text: err?.message || 'Batch edit failed.' }]);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // -- Whole image: flatten unsaved layer work into the lineage first -----
     setChatMessages((prev) => [...prev, { role: 'user', text: msg }, { role: 'assistant', text: '', loading: true }]);
 
     try {
-      const res = await api.edit(parseInt(projectId), msg, chosen.output_image_url, { guidance_scale: editStrength });
+      let sourceUrl = chosen.output_image_url;
+      let snapshotGenId: number | null = null;
+      const ed = useEditorStore.getState();
+      if (ed.doc && (ed.layers.length > 1 || ed.dirtyDoc || ed.dirtyLayerIds.size > 0)) {
+        const canvas = await flattenDoc(ed.doc, ed.layers);
+        const b64 = canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+        const comp = await api.saveComposite(parseInt(projectId), b64, 'Pre-edit snapshot');
+        // Re-anchor before setChosen so the editor doesn't re-seed mid-flight.
+        useEditorStore.getState().setBaseGenerationId(comp.generation.id);
+        await saveEditorDocNow();
+        sourceUrl = comp.generation.output_image_url;
+        snapshotGenId = comp.generation.id;
+        setGenerations((prev) => [...prev.map((g) => ({ ...g, is_chosen: false })), comp.generation]);
+        setChosen(comp.generation);
+        if (ed.layers.length > 1) {
+          setChatMessages((prev) => [
+            ...prev.slice(0, -1),
+            { role: 'assistant', text: 'Flattened your layers into a new version for this edit — the result comes back as a single image (your layered version stays in the rail).' },
+            prev[prev.length - 1],
+          ]);
+        }
+      }
+
+      const res = await api.edit(parseInt(projectId), msg, sourceUrl, { guidance_scale: editStrength });
       const jobId = res.job_id;
       // Edits already present before this run — lets us detect the new one if the
       // background poll claims + saves the job before this loop sees it complete.
+      // The pre-edit snapshot is kind='edit' too and postdates the `generations`
+      // closure — count it as prior or a lost job would report the user's own
+      // unedited snapshot as the AI result.
       const priorEditIds = new Set((generations || []).filter((g) => g.kind === 'edit').map((g) => g.id));
+      if (snapshotGenId !== null) priorEditIds.add(snapshotGenId);
       let done = false;
       for (let i = 0; i < 240; i++) {
         await new Promise((r) => setTimeout(r, 2500));
@@ -357,12 +502,32 @@ export function DesignStudio() {
           </div>
         </div>
         <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+          {editorHasDoc && (
+            <span className="hidden md:flex items-center gap-1 text-[10px] font-label uppercase tracking-widest text-on-surface-variant mr-1" aria-live="polite">
+              {editorSaveState === 'saving' ? (
+                <><span className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" /> Saving</>
+              ) : editorSaveState === 'error' ? (
+                <><Icon name="error" className="text-sm text-error" /> Save failed</>
+              ) : editorDirty ? (
+                <><Icon name="pending" className="text-sm" /> Unsaved</>
+              ) : (
+                <><Icon name="check_circle" className="text-sm" /> Saved</>
+              )}
+            </span>
+          )}
+          {editorHasDoc && (
+            <button onClick={handleSaveVersion} disabled={busy || generating}
+              className="flex items-center gap-1.5 bg-surface-container-high px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 hover:bg-surface-container-highest"
+              title="Flatten the layers into a new version (used by Export and the gallery)">
+              <Icon name="layers" className="text-base" /> <span className="hidden sm:inline">Save version</span>
+            </button>
+          )}
           <button onClick={() => setConfirmRegenerate(true)} disabled={generating}
             className="flex items-center gap-1.5 bg-surface-container-high px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold disabled:opacity-50 hover:bg-surface-container-highest"
             title="Regenerate (replaces current concepts)">
             <Icon name="autorenew" className="text-base" /> <span className="hidden sm:inline">Regenerate</span>
           </button>
-          <button onClick={() => setShowVectorize(true)} disabled={!chosen}
+          <button onClick={handleVectorize} disabled={!chosen}
             className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold transition-all ${
               chosen ? 'bg-surface-container-high hover:bg-surface-container-highest' : 'bg-surface-container-high text-on-surface-variant opacity-50 cursor-not-allowed'
             }`}
@@ -378,9 +543,9 @@ export function DesignStudio() {
         </div>
       </div>
 
-      {showVectorize && chosen && (
+      {showVectorize && vectorizeUrl && (
         <VectorizePanel
-          imageUrl={chosen.output_image_url + '?t=' + chosen.id}
+          imageUrl={vectorizeUrl}
           title={project.title}
           onClose={() => setShowVectorize(false)}
         />
@@ -402,10 +567,11 @@ export function DesignStudio() {
             </div>
           )}
 
-          <div className="flex-1 flex items-center justify-center p-4 sm:p-6 min-h-[240px] sm:min-h-[300px] lg:min-h-0">
+          <div className={chosen
+            ? 'flex-1 flex flex-col min-h-[55vh] lg:min-h-0'
+            : 'flex-1 flex items-center justify-center p-4 sm:p-6 min-h-[240px] sm:min-h-[300px] lg:min-h-0'}>
             {chosen ? (
-              <img src={chosen.output_image_url + '?t=' + chosen.id}
-                alt="Selected design" className="max-w-full max-h-full object-contain rounded-2xl shadow-xl bg-white" />
+              <StudioEditor project={project} chosen={chosen} />
             ) : generating ? (
               <div className="w-full max-w-sm space-y-5">
                 <div className="text-center space-y-1">
@@ -449,7 +615,7 @@ export function DesignStudio() {
           {concepts.length > 1 && (
             <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest flex-shrink-0">
               <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Concepts</p>
-              <div className="flex gap-3 overflow-x-auto">
+              <div className="flex gap-3 overflow-x-auto scrollbar-none">
                 {concepts.map((g, i) => (
                   <button key={g.id} onClick={() => handleChoose(g)} disabled={busy}
                     className={`flex-shrink-0 w-24 h-24 rounded-xl overflow-hidden ring-2 transition-all disabled:opacity-60 ${
@@ -465,7 +631,7 @@ export function DesignStudio() {
           {editHistory.length > 0 && (
             <div className="border-t border-outline-variant/10 p-4 bg-surface-container-lowest flex-shrink-0">
               <p className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant mb-3">Versions · click to revert</p>
-              <div className="flex gap-3 overflow-x-auto">
+              <div className="flex gap-3 overflow-x-auto scrollbar-none">
                 {lineage.map((g, i) => (
                   <button key={g.id} onClick={() => handleChoose(g)} disabled={busy}
                     title={g.kind === 'edit' ? (g.prompt ? 'Edit: ' + g.prompt : 'Edit') : 'Original concept'}
@@ -481,8 +647,22 @@ export function DesignStudio() {
           )}
         </div>
 
-        {/* Right: chat */}
+        {/* Right: layers + chat */}
         <div className="lg:w-2/5 xl:max-w-md flex flex-col bg-surface border-t lg:border-t-0 lg:border-l border-outline-variant/10">
+          {editorHasDoc && (
+            <LayersPanel
+              onRequestAiLayer={(layer) => {
+                const ed = useEditorStore.getState();
+                if (layer) {
+                  ed.selectLayer(layer.id);
+                  ed.setAiScope('layer');
+                } else {
+                  ed.setAiScope('new-layer');
+                }
+                chatInputRef.current?.focus();
+              }}
+            />
+          )}
           <div className="p-4 border-b border-outline-variant/10 flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center">
               <Icon name="chat" className="text-sm text-on-primary-container" />
@@ -508,7 +688,9 @@ export function DesignStudio() {
                       ? 'bg-primary-container text-on-primary-container rounded-br-md'
                       : 'bg-surface-container-high text-on-surface rounded-bl-md'
                   }`}>
-                    {msg.loading ? (
+                    {msg.kind === 'batch' && ai.batch ? (
+                      <AiLayerProgress batch={ai.batch} onRetry={ai.retryBatchLayer} onCancel={ai.cancelBatch} />
+                    ) : msg.loading ? (
                       <div className="flex items-center gap-2 py-1">
                         <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
                         <span className="text-sm text-on-surface-variant">Editing image…</span>
@@ -527,6 +709,7 @@ export function DesignStudio() {
           </div>
 
           <div className="p-4 border-t border-outline-variant/10">
+            {editorHasDoc && <AiScopeBar disabled={busy || !chosen} />}
             <div className="flex items-center gap-3 mb-2.5 px-1">
               <span className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant font-bold whitespace-nowrap">Edit strength</span>
               <input type="range" min={1.5} max={7} step={0.5} value={editStrength}
@@ -565,6 +748,27 @@ export function DesignStudio() {
           </div>
         </div>
       </div>
+
+      {confirmSwitch && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfirmSwitch(null)}>
+          <div className="bg-surface-container-lowest rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-headline font-bold text-lg">Load this version?</h3>
+            <p className="text-on-surface-variant text-sm">
+              The editor&apos;s current layers will be replaced with this version&apos;s image. Use “Save version” first if you want to keep them.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setConfirmSwitch(null)}
+                className="px-5 py-2.5 rounded-xl font-headline font-bold text-sm bg-surface-container-high">
+                Cancel
+              </button>
+              <button onClick={() => confirmSwitch && handleChoose(confirmSwitch, true)}
+                className="px-5 py-2.5 rounded-xl font-headline font-bold text-sm bg-primary-container text-on-primary-container">
+                Load version
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmRegenerate && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfirmRegenerate(false)}>

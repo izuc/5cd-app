@@ -86,3 +86,28 @@ CREATE TABLE `credit_transactions` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
   FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+-- Layered editor: one document per project (layer metadata as opaque JSON;
+-- layer bitmaps live on disk under uploads/projects/{id}/layers/). Additive —
+-- safe to apply to a live DB as-is.
+CREATE TABLE IF NOT EXISTS `editor_documents` (
+  `project_id` BIGINT PRIMARY KEY,
+  `doc_json` JSON NOT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Ownership records for ephemeral layer AI jobs. These jobs deliberately do
+-- NOT touch projects.ai_job_id (so checkAndSaveJob never claims them and their
+-- results never become generations); this table lets /jobs/{id}/status
+-- authorize the poll. Rows are garbage-collected opportunistically on insert.
+CREATE TABLE IF NOT EXISTS `ai_jobs` (
+  `job_id` VARCHAR(50) PRIMARY KEY,
+  `project_id` BIGINT NOT NULL,
+  `user_id` BIGINT NOT NULL,
+  `purpose` ENUM('layer_edit','layer_generate') NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+  INDEX `idx_ai_jobs_created` (`created_at`)
+) ENGINE=InnoDB;

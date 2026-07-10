@@ -401,7 +401,77 @@ def _b64_to_pil(b64: str) -> Image.Image:
     if len(raw) > MAX_REF_BYTES:
         raise ValueError("ref image too large")
     Image.open(io.BytesIO(raw)).verify()
-    return Image.open(io.BytesIO(raw)).convert("RGB")
+    img = Image.open(io.BytesIO(raw))
+    # Alpha-aware flatten: naive convert("RGB") composites RGBA onto BLACK,
+    # which would turn a transparent layer sent for editing into subject-on-
+    # black. Flatten onto white instead (matches the transparent-gen prompt
+    # hint, so round-tripped layers re-matte cleanly).
+    if img.mode == "P":
+        img = img.convert("RGBA")
+    if img.mode in ("RGBA", "LA"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        return bg
+    return img.convert("RGB")
+
+
+# ---------------------------------------------------------------------------
+# Background removal (transparent layer generation)
+# ---------------------------------------------------------------------------
+TRANSPARENT_HINT = ". Isolated subject on a plain solid white background, no shadows."
+
+_rembg_session = None
+_rembg_error: str = ""
+_rembg_lock = threading.Lock()
+
+
+def _load_rembg() -> bool:
+    """Lazy-load the rembg matting session (onnxruntime, CPU — no VRAM use)."""
+    global _rembg_session, _rembg_error
+    if _rembg_session is not None:
+        return True
+    if _rembg_error:
+        return False
+    with _rembg_lock:
+        if _rembg_session is not None:
+            return True
+        if _rembg_error:
+            return False
+        try:
+            os.environ.setdefault("U2NET_HOME", os.path.join(MODELS_DIR, "rembg"))
+            from rembg import new_session
+            _rembg_session = new_session("isnet-general-use")
+            print("[rembg] matting session ready (isnet-general-use, CPU)")
+            return True
+        except Exception as e:  # noqa: BLE001
+            _rembg_error = f"{type(e).__name__}: {e}"
+            print(f"[rembg] unavailable: {_rembg_error} — falling back to white-key matte")
+            return False
+
+
+def _white_key(img: Image.Image, lo: int = 8, hi: int = 72) -> Image.Image:
+    """Soft-ramp chroma key against white: alpha ramps 0->255 as a pixel moves
+    away from pure white. Cruder than real matting but dependency-free."""
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    dist = 255 - arr.min(axis=2)  # 0 for white, grows with any colour/darkness
+    alpha = np.clip((dist - lo) * (255.0 / max(1, hi - lo)), 0, 255).astype(np.uint8)
+    return Image.fromarray(np.dstack([arr.astype(np.uint8), alpha]), "RGBA")
+
+
+def _remove_background(img: Image.Image) -> Image.Image:
+    """RGB -> RGBA. rembg when available, soft white-key otherwise. Never raises."""
+    try:
+        if _load_rembg():
+            from rembg import remove
+            out = remove(img, session=_rembg_session)
+            return out.convert("RGBA")
+    except Exception as e:  # noqa: BLE001
+        print(f"[rembg] matting failed: {e} — falling back to white-key")
+    try:
+        return _white_key(img)
+    except Exception as e:  # noqa: BLE001
+        print(f"[matte] white-key failed: {e}")
+        return img.convert("RGBA")
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +548,7 @@ def _process_generate(job: Job) -> None:
     # just by seed. Only meaningful for >1 concept.
     vary = bool(p.get("vary_concepts")) and num > 1
     design_type = p.get("design_type")
+    transparent = bool(p.get("transparent"))
 
     have_model = _load_pipeline()
     images_b64: list[str] = []
@@ -494,6 +565,8 @@ def _process_generate(job: Job) -> None:
                     cprompt = _expand_prompt(raw_prompt, design_type)
                 except Exception:  # noqa: BLE001
                     cprompt = raw_prompt
+            if transparent:
+                cprompt = cprompt.rstrip(". ") + TRANSPARENT_HINT
             is_ph = True
             if have_model:
                 try:
@@ -506,6 +579,8 @@ def _process_generate(job: Job) -> None:
                     img = _placeholder_image(cprompt, width, height, seed)
             else:
                 img = _placeholder_image(cprompt, width, height, seed)
+            if transparent and not is_ph:
+                img = _remove_background(img)
             images_b64.append(_pil_to_b64(img))
             placeholder_flags.append(is_ph)
             job.progress = int(((i + 1) / num) * 100)
@@ -523,6 +598,7 @@ def _process_generate(job: Job) -> None:
         "steps": steps,
         "guidance_scale": guidance,
         "placeholder": placeholder,
+        "transparent": transparent,
         "error": (_pipe_error or last_error) if placeholder else "",
     }
 
@@ -530,6 +606,9 @@ def _process_generate(job: Job) -> None:
 def _process_edit(job: Job) -> None:
     p = job.params
     prompt = (p.get("prompt") or "").strip() or "Refine the image."
+    transparent = bool(p.get("transparent"))
+    if transparent:
+        prompt = prompt.rstrip(". ") + TRANSPARENT_HINT
     refs_b64 = p.get("ref_images") or []
     if not refs_b64:
         raise ValueError("edit job requires at least one ref image")
@@ -555,6 +634,9 @@ def _process_edit(job: Job) -> None:
     else:
         img = _placeholder_image(prompt, width, height, int(seed))
 
+    if transparent and have_model:
+        img = _remove_background(img)
+
     _free_vram()
     job.progress = 100
     job.result = {
@@ -565,6 +647,7 @@ def _process_edit(job: Job) -> None:
         "steps": steps,
         "guidance_scale": guidance,
         "placeholder": not have_model,
+        "transparent": transparent,
         "error": (edit_error or _pipe_error) if not have_model else "",
     }
 
@@ -623,6 +706,9 @@ class GenerateRequest(BaseModel):
     enhance: bool = False
     vary_concepts: bool = False  # rewrite the prompt per concept for unique results
     design_type: Optional[str] = None
+    # Isolate the subject and matte the background away -> RGBA output
+    # (used by the layered editor to generate stickable layers).
+    transparent: bool = False
     ref_images: Optional[list[str]] = None
     img_cfg_scale: Optional[float] = None
     cfg_norm: Optional[str] = None
@@ -636,6 +722,7 @@ class EditRequest(BaseModel):
     width: Optional[int] = Field(None, ge=256, le=4096)
     height: Optional[int] = Field(None, ge=256, le=4096)
     steps: int = Field(DEFAULT_STEPS, ge=1, le=50)
+    transparent: bool = False  # matte the result background away -> RGBA
     guidance_scale: Optional[float] = None
     cfg_scale: Optional[float] = None
     img_cfg_scale: Optional[float] = None
@@ -744,6 +831,7 @@ async def api_health():
         "engine": ENGINE,
         "supports_edit": SUPPORTS_EDIT,
         "supports_upscale": True,
+        "supports_transparent": True,
         "max_side": MAX_SIDE,
         "steps": DEFAULT_STEPS,
         "queue": {
