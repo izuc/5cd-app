@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels, mergeGradientBands, reinforceRidges } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels, mergeGradientBands, reinforceRidges, bridgeLineEndpoints } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -174,6 +174,10 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         ridged = r.labels;
         if (r.changed === 0) break;
       }
+      // Bridge dead gaps the ridge test cannot see (line faded completely or cut
+      // by a crossing feature): thin fragments whose tips point at each other
+      // across a short gap are one stroke.
+      ridged = bridgeLineEndpoints(ridged, origWidth, origHeight, processedData, finalPalette).labels;
 
       // Merge adjacent bands of one smooth ramp into single regions — they trace
       // as one shape with one fitted gradient instead of a patchwork of flat bands.

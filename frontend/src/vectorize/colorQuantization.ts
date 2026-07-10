@@ -1574,6 +1574,157 @@ export function reinforceRidges(
   return { labels: out, changed };
 }
 
+// Endpoint bridging — the last mile of line connectivity. Ridge reinforcement
+// reconnects pixels that still LOOK like the line in the raw image; where a
+// line fades completely for a few pixels (or is cut by a crossing feature),
+// there is no ridge to detect and a dead gap remains. But the geometry still
+// tells the story: two thin line fragments whose TIPS point at each other
+// across a short gap are one stroke. Find the tips, march along each tip's
+// own direction, and if a compatible fragment sits within reach, paint the
+// bridge with the tip's label — the thin-link pass then merges the pieces.
+export function bridgeLineEndpoints(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  rgba: Uint8ClampedArray,
+  palette: Color[],
+  maxGap: number = 4,
+  colorTol: number = 60,
+  gapRawTol: number = 80 // the gap must still LOOK like the (faded) line in the raw image
+): { labels: Uint8Array; bridges: number } {
+  const total = width * height;
+
+  // 1. Thin-region line mask (same thinness notion as the thin-link rule).
+  const comp = new Int32Array(total).fill(-1);
+  let compCount = 0;
+  const stack: number[] = [];
+  const compN: number[] = [];
+  const compX0: number[] = [], compY0: number[] = [], compX1: number[] = [], compY1: number[] = [];
+  for (let seed = 0; seed < total; seed++) {
+    if (comp[seed] !== -1 || labels[seed] === 255) continue;
+    const l = labels[seed];
+    const id = compCount++;
+    comp[seed] = id;
+    stack.push(seed);
+    let n = 0, x0 = width, y0 = height, x1 = -1, y1 = -1;
+    while (stack.length > 0) {
+      const i = stack.pop()!;
+      n++;
+      const x = i % width, y = (i / width) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && comp[i - 1] === -1 && labels[i - 1] === l) { comp[i - 1] = id; stack.push(i - 1); }
+      if (x < width - 1 && comp[i + 1] === -1 && labels[i + 1] === l) { comp[i + 1] = id; stack.push(i + 1); }
+      if (y > 0 && comp[i - width] === -1 && labels[i - width] === l) { comp[i - width] = id; stack.push(i - width); }
+      if (y < height - 1 && comp[i + width] === -1 && labels[i + width] === l) { comp[i + width] = id; stack.push(i + width); }
+    }
+    compN.push(n); compX0.push(x0); compY0.push(y0); compX1.push(x1); compY1.push(y1);
+  }
+  const isLine = new Uint8Array(compCount);
+  for (let c = 0; c < compCount; c++) {
+    const ext = Math.max(compX1[c] - compX0[c] + 1, compY1[c] - compY0[c] + 1);
+    if (ext >= 8 && compN[c] / ext <= 4) isLine[c] = 1;
+  }
+  const mask = new Uint8Array(total);
+  for (let i = 0; i < total; i++) if (comp[i] >= 0 && isLine[comp[i]] === 1) mask[i] = 1;
+
+  // 2. Tips: line-mask pixels with at most two 8-neighbours in the mask.
+  const out = new Uint8Array(labels);
+  let bridges = 0;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      if (mask[i] !== 1) continue;
+      let nb = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if ((dx || dy) && mask[i + dy * width + dx] === 1) nb++;
+      }
+      if (nb === 0 || nb > 2) continue;
+
+      // Tip direction: away from the local mass of this fragment (BFS ≤ 5 steps).
+      const myComp = comp[i];
+      let sx = 0, sy = 0, sn = 0;
+      const seen = new Set<number>([i]);
+      let frontier = [i];
+      for (let step = 0; step < 5 && frontier.length > 0; step++) {
+        const next: number[] = [];
+        for (const f of frontier) {
+          const fx = f % width, fy = (f / width) | 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx2 = fx + dx, ny2 = fy + dy;
+            if (nx2 < 1 || nx2 >= width - 1 || ny2 < 1 || ny2 >= height - 1) continue;
+            const ni = ny2 * width + nx2;
+            if (seen.has(ni) || comp[ni] !== myComp) continue;
+            seen.add(ni);
+            next.push(ni);
+            sx += nx2; sy += ny2; sn++;
+          }
+        }
+        frontier = next;
+      }
+      if (sn < 3) continue;
+      let dx0 = x - sx / sn, dy0 = y - sy / sn;
+      const dl = Math.hypot(dx0, dy0);
+      if (dl < 0.5) continue;
+      dx0 /= dl; dy0 /= dl;
+
+      // 3. March along the tip direction (with ±1 perpendicular tolerance).
+      const px = -dy0, py = dx0;
+      let hit = -1, hitT = 0;
+      for (let t = 1; t <= maxGap && hit < 0; t++) {
+        for (const o of [0, 1, -1]) {
+          const cx = Math.round(x + dx0 * t + px * o), cy = Math.round(y + dy0 * t + py * o);
+          if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
+          const ci = cy * width + cx;
+          if (mask[ci] === 1 && comp[ci] !== myComp) {
+            const dc = colorDistance(palette[labels[i]], palette[labels[ci]]);
+            if (dc <= colorTol) { hit = ci; hitT = t; break; }
+          }
+        }
+      }
+      if (hit < 0) continue;
+
+      // Raw-image sanity: in a genuinely faded line the gap pixels are blends of
+      // the line and its surroundings; a gap that reads as a DIFFERENT surface
+      // (e.g. a dark mesh cell between grey lattice tips) must not be bridged —
+      // false strings through texture destabilise the plane tiling.
+      {
+        const lp = palette[labels[i]];
+        const gx1 = hit % width, gy1 = (hit / width) | 0;
+        let rawSum = 0, rawN = 0;
+        const gSteps = Math.max(1, hitT);
+        for (let t = 1; t < gSteps; t++) {
+          const gx = Math.round(x + ((gx1 - x) * t) / gSteps), gy = Math.round(y + ((gy1 - y) * t) / gSteps);
+          const gi = (gy * width + gx) * 4;
+          const dr = rgba[gi] - lp.r, dg = rgba[gi + 1] - lp.g, db = rgba[gi + 2] - lp.b;
+          rawSum += Math.sqrt(dr * dr + dg * dg + db * db);
+          rawN++;
+        }
+        if (rawN > 0 && rawSum / rawN > gapRawTol) continue;
+      }
+
+      // 4. Paint the straight bridge (2px wide so upscaling can't re-break it).
+      // Never paint over OTHER linework: cutting a crossing line splits it and
+      // its pinch points trace as uncovered slivers — and a junction where two
+      // strokes cross is genuine layering, not a gap.
+      const hx = hit % width, hy = (hit / width) | 0;
+      const steps = Math.max(1, hitT);
+      for (let t = 1; t < steps; t++) {
+        const bx = Math.round(x + ((hx - x) * t) / steps), by = Math.round(y + ((hy - y) * t) / steps);
+        for (const o of [0, 1, -1]) {
+          const cx2 = Math.round(bx + px * o), cy2 = Math.round(by + py * o);
+          if (cx2 < 0 || cx2 >= width || cy2 < 0 || cy2 >= height) continue;
+          const bi = cy2 * width + cx2;
+          if (out[bi] !== 255 && mask[bi] === 0) out[bi] = labels[i];
+        }
+      }
+      bridges++;
+    }
+  }
+  return { labels: out, bridges };
+}
+
 // Gradient-driven band merging. Quantisation slices every smooth ramp (metallic
 // chrome, airbrushed shading) into bands of adjacent palette shades; the tracer
 // then emits one shape per band — the residual "patchiness". This pass merges
