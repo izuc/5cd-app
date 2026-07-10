@@ -15,12 +15,24 @@ export interface Point {
   y: number;
 }
 
+// Linear colour ramp fitted to a shape's underlying pixels. Coordinates are in
+// the OUTPUT viewBox (native) space; endpoints are the ramp's extreme points.
+export interface ShapeGradient {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  c0: Color;
+  c1: Color;
+}
+
 export interface ShapeData {
   path: string;          // outer contour + any enclosed-hole subpaths
   color: Color;
   area: number;
   isBackground: boolean;
   hasHoles?: boolean;    // true → path has hole subpaths and needs fill-rule=evenodd
+  gradient?: ShapeGradient; // present → fill with a linearGradient instead of the flat colour
 }
 
 export type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';

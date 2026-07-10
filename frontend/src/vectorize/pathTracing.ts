@@ -1,4 +1,4 @@
-import type { Color, ShapeData, Point } from './types';
+import type { Color, ShapeData, ShapeGradient, Point } from './types';
 import { colorToHex } from './colorQuantization';
 
 // ============ Geometric Helpers ============
@@ -1024,6 +1024,99 @@ export function identifyPerimeterColors(
   return perimeterColors;
 }
 
+// Accumulated least-squares sums for fitting colour(x, y) = a + b·x + c·y over a
+// component's source pixels (positions in native/viewBox coordinates).
+interface GradSums {
+  n: number;
+  sx: number; sy: number; sxx: number; syy: number; sxy: number;
+  sc: Float64Array;   // Σ channel            (r, g, b)
+  scx: Float64Array;  // Σ channel · x
+  scy: Float64Array;  // Σ channel · y
+  scc: Float64Array;  // Σ channel²
+  cmin: Float64Array; // observed channel minimum
+  cmax: Float64Array; // observed channel maximum
+}
+
+// Fit a linear colour ramp to a component and decide whether a linearGradient
+// fill is warranted. Quantisation flattens smooth shading (metallic chrome,
+// airbrushed fades) into banded fills; where a plane c(x,y)=a+bx+cy explains the
+// component's colour variation well AND the ramp is big enough to see, a real
+// gradient both looks smoother and melts the banding between neighbouring
+// shapes (each band's fit passes close to the true ramp, so bands meet
+// near-seamlessly). Returns undefined for genuinely flat or textured regions.
+function fitLinearGradient(
+  g: GradSums,
+  bx0: number, by0: number, bx1: number, by1: number // component bbox, native coords
+): ShapeGradient | undefined {
+  if (g.n < 300) return undefined;
+
+  // Solve the shared 3×3 normal equations via the explicit inverse (Cramer).
+  const m00 = g.n, m01 = g.sx, m02 = g.sy;
+  const m11 = g.sxx, m12 = g.sxy, m22 = g.syy;
+  const det = m00 * (m11 * m22 - m12 * m12) - m01 * (m01 * m22 - m12 * m02) + m02 * (m01 * m12 - m11 * m02);
+  // Degenerate spatial spread (hairline components) — no reliable plane.
+  if (!(Math.abs(det) > 1e-3 * g.n)) return undefined;
+  const i00 = (m11 * m22 - m12 * m12) / det;
+  const i01 = (m02 * m12 - m01 * m22) / det;
+  const i02 = (m01 * m12 - m02 * m11) / det;
+  const i11 = (m00 * m22 - m02 * m02) / det;
+  const i12 = (m01 * m02 - m00 * m12) / det;
+  const i22 = (m00 * m11 - m01 * m01) / det;
+
+  const a = new Float64Array(3), b = new Float64Array(3), c = new Float64Array(3);
+  let sseFlat = 0, ssePlane = 0;
+  for (let ch = 0; ch < 3; ch++) {
+    a[ch] = i00 * g.sc[ch] + i01 * g.scx[ch] + i02 * g.scy[ch];
+    b[ch] = i01 * g.sc[ch] + i11 * g.scx[ch] + i12 * g.scy[ch];
+    c[ch] = i02 * g.sc[ch] + i12 * g.scx[ch] + i22 * g.scy[ch];
+    sseFlat += Math.max(0, g.scc[ch] - (g.sc[ch] * g.sc[ch]) / g.n);
+    ssePlane += Math.max(0, g.scc[ch] - (a[ch] * g.sc[ch] + b[ch] * g.scx[ch] + c[ch] * g.scy[ch]));
+  }
+  // The plane must genuinely explain the variation — textured regions (brushed
+  // metal noise, speckle) keep a high residual and stay flat-filled.
+  if (!(ssePlane <= 0.6 * sseFlat)) return undefined;
+
+  // Ramp direction: dominant eigenvector of Σ (per-channel gradient)·(gradientᵀ),
+  // so channels moving in opposite directions (blue up, red down) still agree.
+  let gxx = 0, gxy = 0, gyy = 0;
+  for (let ch = 0; ch < 3; ch++) { gxx += b[ch] * b[ch]; gxy += b[ch] * c[ch]; gyy += c[ch] * c[ch]; }
+  const tr = gxx + gyy;
+  const d2 = Math.sqrt(Math.max(0, (gxx - gyy) * (gxx - gyy) + 4 * gxy * gxy));
+  const l1 = (tr + d2) / 2;
+  if (!(l1 > 1e-12)) return undefined;
+  let dx: number, dy: number;
+  if (Math.abs(gxy) > 1e-12) { dx = l1 - gyy; dy = gxy; }
+  else if (gxx >= gyy) { dx = 1; dy = 0; }
+  else { dx = 0; dy = 1; }
+  const dl = Math.hypot(dx, dy);
+  dx /= dl; dy /= dl;
+
+  // Endpoints: extreme projections of the bbox corners along the ramp direction,
+  // measured from the centroid (keeps the line anchored inside the shape).
+  const mx = g.sx / g.n, my = g.sy / g.n;
+  let tmin = Infinity, tmax = -Infinity;
+  for (const [px, py] of [[bx0, by0], [bx1, by0], [bx0, by1], [bx1, by1]] as const) {
+    const t = dx * (px - mx) + dy * (py - my);
+    if (t < tmin) tmin = t;
+    if (t > tmax) tmax = t;
+  }
+  // Clamp stops to the OBSERVED channel range: bbox-corner endpoints extrapolate
+  // beyond the component's mass on diagonal/L-shaped regions, and unclamped
+  // extrapolation can invert hue (one channel keeps climbing while others fall).
+  const clamp = (v: number, ch: number) => Math.max(g.cmin[ch], Math.min(g.cmax[ch], Math.round(v)));
+  const evalAt = (x: number, y: number): Color => ({ r: clamp(a[0] + b[0] * x + c[0] * y, 0), g: clamp(a[1] + b[1] * x + c[1] * y, 1), b: clamp(a[2] + b[2] * x + c[2] * y, 2), a: 255 });
+  const x1 = mx + dx * tmin, y1 = my + dy * tmin;
+  const x2 = mx + dx * tmax, y2 = my + dy * tmax;
+  const c0 = evalAt(x1, y1), c1 = evalAt(x2, y2);
+
+  // Below a visible ramp span a flat fill is indistinguishable and cheaper.
+  const span = Math.max(Math.abs(c0.r - c1.r), Math.abs(c0.g - c1.g), Math.abs(c0.b - c1.b));
+  if (span < 14) return undefined;
+
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  return { x1: r1(x1), y1: r1(y1), x2: r1(x2), y2: r1(y2), c0, c1 };
+}
+
 export function traceAllColors(
   quantized: Uint8Array,
   width: number,
@@ -1036,7 +1129,10 @@ export function traceAllColors(
   qualityLevel: 'fast' | 'balanced' | 'high' | 'detailed' = 'balanced',
   foregroundMask?: Uint8Array | null,
   mergeNeighbors: boolean = true, // merge nearby same-color regions
-  simplifyScale: number = 1       // label-upscale factor (scales RDP tolerance)
+  simplifyScale: number = 1,      // label-upscale factor (scales RDP tolerance)
+  sourceRgba?: Uint8ClampedArray | null, // native-res image for gradient fitting
+  sourceWidth: number = 0,
+  sourceHeight: number = 0
 ): ShapeData[] {
   const result: ShapeData[] = [];
 
@@ -1060,6 +1156,35 @@ export function traceAllColors(
   // outlines rendered as "bead chains". The label map is already consolidated
   // upstream, so tracing the exact per-pixel partition is both cleaner and safer.
   const mergeRadius = mergeNeighbors && qualityLevel === 'fast' ? 2 : 0;
+
+  // Gradient fitting samples the native-res source on the native grid (every
+  // sfi-th working pixel) — statistically identical to sampling every working
+  // pixel at a fraction of the cost. Sums live in `gs`, reset per component.
+  const doGrad = !!(sourceRgba && sourceWidth > 0 && sourceHeight > 0 && width % sourceWidth === 0);
+  const sfi = doGrad ? Math.max(1, Math.round(width / sourceWidth)) : 1;
+  const gs: GradSums = {
+    n: 0, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0,
+    sc: new Float64Array(3), scx: new Float64Array(3), scy: new Float64Array(3), scc: new Float64Array(3),
+    cmin: new Float64Array(3), cmax: new Float64Array(3),
+  };
+  const gradAccum = (px: number, py: number) => {
+    if (px % sfi !== 0 || py % sfi !== 0) return;
+    const gx = px / sfi, gy = py / sfi;
+    const si = (gy * sourceWidth + gx) * 4;
+    gs.n++;
+    gs.sx += gx; gs.sy += gy; gs.sxx += gx * gx; gs.syy += gy * gy; gs.sxy += gx * gy;
+    for (let ch = 0; ch < 3; ch++) {
+      const v = sourceRgba![si + ch];
+      gs.sc[ch] += v; gs.scx[ch] += v * gx; gs.scy[ch] += v * gy; gs.scc[ch] += v * v;
+      if (v < gs.cmin[ch]) gs.cmin[ch] = v;
+      if (v > gs.cmax[ch]) gs.cmax[ch] = v;
+    }
+  };
+  const gradReset = () => {
+    gs.n = 0; gs.sx = 0; gs.sy = 0; gs.sxx = 0; gs.syy = 0; gs.sxy = 0;
+    gs.sc.fill(0); gs.scx.fill(0); gs.scy.fill(0); gs.scc.fill(0);
+    gs.cmin.fill(255); gs.cmax.fill(0);
+  };
 
   // Process each color separately with optional merging
   for (const colorIndex of colorsToTrace) {
@@ -1121,6 +1246,7 @@ export function traceAllColors(
           let cbx0 = x, cby0 = y, cbx1 = x, cby1 = y;
           const stack = [idx];
           visited[idx] = 1;
+          if (doGrad) gradReset();
 
           // Count original color pixels in this merged region
           if (colorMask[idx] === 1) {
@@ -1128,6 +1254,7 @@ export function traceAllColors(
             if (foregroundMask && foregroundMask[idx] === 1) {
               foregroundPixelCount++;
             }
+            if (doGrad) gradAccum(x, y);
           }
 
           while (stack.length > 0) {
@@ -1161,6 +1288,7 @@ export function traceAllColors(
                      if (foregroundMask && foregroundMask[nIdx] === 1) {
                        foregroundPixelCount++;
                      }
+                     if (doGrad) gradAccum(nx, ny);
                    }
                    stack.push(nIdx);
                  }
@@ -1256,12 +1384,18 @@ export function traceAllColors(
             }
           }
 
+          // Linear-ramp fit (native/viewBox coordinates; bbox mapped from working res).
+          const gradient = doGrad
+            ? fitLinearGradient(gs, cbx0 / sfi, cby0 / sfi, cbx1 / sfi, cby1 / sfi)
+            : undefined;
+
           result.push({
             color: palette[colorIndex],
             path: pathStr,
             area: pixelCount,
             isBackground,
-            hasHoles
+            hasHoles,
+            gradient
           });
         }
       }
@@ -1372,21 +1506,23 @@ export function generateSvg(
     }
   }
 
-  // Build SVG with proper structure
-  // shape-rendering=geometricPrecision asks renderers for the smoothest (anti-aliased)
-  // edges rather than crisp/aliased ones.
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" shape-rendering="geometricPrecision">\n`;
-
-  // Add metadata/title for better organization
-  svg += `  <title>Vectorized Image</title>\n`;
-  svg += `  <desc>Generated with Raster2Vector - ${colorGroups.size} colors</desc>\n`;
-
-  // Define styles for easier editing
-  svg += `  <defs>\n`;
-  svg += `    <style>\n`;
-  svg += `      .vector-shape { stroke-linejoin: round; stroke-linecap: round; }\n`;
-  svg += `    </style>\n`;
-  svg += `  </defs>\n`;
+  // Fitted colour ramps become real linearGradient fills. Defs are collected
+  // while the body is built, then assembled into the header. userSpaceOnUse +
+  // output-viewBox coordinates so the ramp lines up with the traced geometry in
+  // every renderer; the seam-bridge stroke uses the same paint so it stays
+  // invisible over the gradient.
+  const gradDefs: string[] = [];
+  const paintFor = (hex: string, gradient?: ShapeGradient): string => {
+    if (!gradient) return hex;
+    const id = `lg${gradDefs.length}`;
+    gradDefs.push(
+      `    <linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${gradient.x1}" y1="${gradient.y1}" x2="${gradient.x2}" y2="${gradient.y2}">` +
+      `<stop offset="0" stop-color="${colorToHex(gradient.c0)}"/>` +
+      `<stop offset="1" stop-color="${colorToHex(gradient.c1)}"/>` +
+      `</linearGradient>\n`
+    );
+    return `url(#${id})`;
+  };
 
   // NOTE: we deliberately do NOT emit a standalone <rect id="background"> here.
   // The background is already traced as a real shape (the dominant full-canvas
@@ -1395,8 +1531,8 @@ export function generateSvg(
   // traced shapes). The traced background shape is the backdrop and is editable
   // like everything else.
 
-  // Main content group
-  svg += `  <g id="content">\n`;
+  // Body first (it registers gradient defs), header + defs assembled at the end.
+  let svg = `  <g id="content">\n`;
 
   if (removeBackground) {
     // REMOVE BACKGROUND MODE: Filter out detected background shapes
@@ -1404,7 +1540,7 @@ export function generateSvg(
     // Include foreground shapes + small background shapes (interior details like letter holes)
 
     const smallShapeThreshold = width * height * 0.05; // 5% of image area
-    type FShape = { hex: string; path: string; area: number; hasHoles?: boolean };
+    type FShape = { hex: string; path: string; area: number; hasHoles?: boolean; gradient?: ShapeGradient };
     const drawn: FShape[] = [];
 
     for (const shape of shapes) {
@@ -1419,7 +1555,7 @@ export function generateSvg(
 
       const isSmallBackground = shape.isBackground && shape.area < smallShapeThreshold;
       if (!shape.isBackground || (isSmallBackground && !isDominantBg)) {
-        drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles });
+        drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles, gradient: shape.gradient });
       }
     }
 
@@ -1427,7 +1563,7 @@ export function generateSvg(
     if (drawn.length === 0) {
       for (const shape of shapes) {
         const hex = colorToHex(shape.color);
-        if (hex !== dominantHex) drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles });
+        if (hex !== dominantHex) drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles, gradient: shape.gradient });
       }
     }
 
@@ -1441,7 +1577,11 @@ export function generateSvg(
     for (const s of drawn) {
       const d = scalePathString(s.path, pathScale);
       const fillRule = s.hasHoles ? ' fill-rule="evenodd"' : '';
-      svg += `      <path fill="${s.hex}"${fillRule} stroke="${s.hex}" stroke-width="${strokeWidth}" stroke-linejoin="round" d="${d}"/>\n`;
+      const p = paintFor(s.hex, s.gradient);
+      // data-c carries the flat label colour for gradient shapes so the editor's
+      // colour rail can still group/select/recolour them by colour.
+      const dataC = s.gradient ? ` data-c="${s.hex}"` : '';
+      svg += `      <path fill="${p}"${fillRule}${dataC} stroke="${p}" stroke-width="${strokeWidth}" stroke-linejoin="round" d="${d}"/>\n`;
     }
     svg += `    </g>\n`;
 
@@ -1450,7 +1590,7 @@ export function generateSvg(
     // This ensures large background shapes are drawn first, then smaller details on top
 
     // Collect ALL individual shapes with their colors and areas
-    const allShapesFlat: Array<{ hex: string; path: string; area: number; hasHoles?: boolean }> = [];
+    const allShapesFlat: Array<{ hex: string; path: string; area: number; hasHoles?: boolean; gradient?: ShapeGradient }> = [];
 
     for (const shape of shapes) {
       const hex = colorToHex(shape.color);
@@ -1458,7 +1598,8 @@ export function generateSvg(
         hex,
         path: shape.path,
         area: shape.area,
-        hasHoles: shape.hasHoles
+        hasHoles: shape.hasHoles,
+        gradient: shape.gradient
       });
     }
 
@@ -1474,17 +1615,33 @@ export function generateSvg(
     // hairline-only and a hairline bridge is all that's needed.
     const strokeWidthStd = Math.max(1, Math.min(width, height) * 0.0006);
     svg += `    <g id="shapes-layer">\n`;
-    for (const { hex, path, hasHoles } of allShapesFlat) {
+    for (const { hex, path, hasHoles, gradient } of allShapesFlat) {
       const scaledPath = scalePathString(path, pathScale);
       const fillRule = hasHoles ? ' fill-rule="evenodd"' : '';
-      svg += `      <path fill="${hex}"${fillRule} stroke="${hex}" stroke-width="${strokeWidthStd}" stroke-linejoin="round" d="${scaledPath}"/>\n`;
+      const p = paintFor(hex, gradient);
+      // data-c: flat label colour for the editor's colour rail (see remove-bg branch).
+      const dataC = gradient ? ` data-c="${hex}"` : '';
+      svg += `      <path fill="${p}"${fillRule}${dataC} stroke="${p}" stroke-width="${strokeWidthStd}" stroke-linejoin="round" d="${scaledPath}"/>\n`;
     }
     svg += `    </g>\n`;
   }
 
   svg += `  </g>\n`;
   svg += `</svg>`;
-  return svg;
+
+  // Assemble header now the body has registered its gradient defs.
+  // shape-rendering=geometricPrecision asks renderers for the smoothest
+  // (anti-aliased) edges rather than crisp/aliased ones.
+  let header = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" shape-rendering="geometricPrecision">\n`;
+  header += `  <title>Vectorized Image</title>\n`;
+  header += `  <desc>Generated with Raster2Vector - ${colorGroups.size} colors</desc>\n`;
+  header += `  <defs>\n`;
+  header += `    <style>\n`;
+  header += `      .vector-shape { stroke-linejoin: round; stroke-linecap: round; }\n`;
+  header += `    </style>\n`;
+  header += gradDefs.join('');
+  header += `  </defs>\n`;
+  return header + svg;
 }
 
 // Alternative: Generate SVG with separate paths but organized in groups (for maximum editability)

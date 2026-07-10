@@ -99,7 +99,10 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
         let id = el.getAttribute('id') || '';
         if (!id || used.has(id)) { while (used.has(`s${n}`)) n++; id = `s${n++}`; el.setAttribute('id', id); }
         used.add(id);
-        els.push({ id, type: el.tagName.toLowerCase(), fill: el.getAttribute('fill') || '#000000', el, bounds: elBounds(el, viewBox) });
+        // data-c = the flat label colour the tracer stamped on gradient-filled
+        // shapes; grouping by it keeps the colour rail meaningful (url(#lg…)
+        // fills would otherwise each be their own "colour").
+        els.push({ id, type: el.tagName.toLowerCase(), fill: el.getAttribute('data-c') || el.getAttribute('fill') || '#000000', el, bounds: elBounds(el, viewBox) });
       });
     }
     return { doc: d, svgEl: root, vb: viewBox, elements: els };
@@ -147,7 +150,9 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
   }, [doc, onChange]);
 
   const recolorIds = useCallback((ids: Iterable<string>, hex: string) => {
-    commit((d) => { for (const id of ids) { const el = d.getElementById(id); if (!el) continue; el.setAttribute('fill', hex); if (el.getAttribute('stroke')) el.setAttribute('stroke', hex); } });
+    // Recolouring flattens gradient fills — drop the label-colour marker so the
+    // rail re-groups the shape under its new colour.
+    commit((d) => { for (const id of ids) { const el = d.getElementById(id); if (!el) continue; el.setAttribute('fill', hex); el.removeAttribute('data-c'); if (el.getAttribute('stroke')) el.setAttribute('stroke', hex); } });
   }, [commit]);
 
   const deleteIds = useCallback((ids: Iterable<string>) => {
@@ -395,7 +400,7 @@ export function SvgVectorEditor({ svg, onChange }: { svg: string; onChange: (svg
               <defs dangerouslySetInnerHTML={{ __html: svgEl.querySelector('defs')?.innerHTML || '' }} />
               {elements.map((el) => {
                 const attrs: Record<string, string> = {};
-                for (let i = 0; i < el.el.attributes.length; i++) { const a = el.el.attributes[i]; if (a.name !== 'id') attrs[a.name === 'class' ? 'className' : kebabToCamel(a.name)] = a.value; }
+                for (let i = 0; i < el.el.attributes.length; i++) { const a = el.el.attributes[i]; if (a.name !== 'id') attrs[a.name === 'class' ? 'className' : a.name.startsWith('data-') ? a.name : kebabToCamel(a.name)] = a.value; }
                 const Tag = el.type as any;
                 const sel = selected.has(el.id);
                 if (sel && moveDelta) {

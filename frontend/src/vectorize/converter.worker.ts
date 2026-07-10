@@ -216,7 +216,10 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         qualityLevel,
         finalMask,
         true,          // mergeNeighbors
-        scaleFactor    // scale RDP tolerance to the upscaled trace resolution
+        scaleFactor,   // scale RDP tolerance to the upscaled trace resolution
+        processedData, // native-res image → per-shape linearGradient fitting
+        origWidth,
+        origHeight
       );
 
       postProgress(0.95, 'Generating SVG...');
