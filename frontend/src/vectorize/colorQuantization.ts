@@ -1271,6 +1271,31 @@ export function createForegroundMask(
   return dilatedMask;
 }
 
+// Recompute each palette entry as the mean of the pixels ACTUALLY assigned to it.
+// The palette was estimated from a sparse sample before cleanup; after merging /
+// consolidation the label contents have shifted, and the true per-label mean is a
+// strictly better fill colour for the final SVG.
+export function refreshPaletteFromLabels(
+  labels: Uint8Array,
+  rgba: Uint8ClampedArray,
+  palette: Color[]
+): Color[] {
+  const n = palette.length;
+  const sumR = new Float64Array(n), sumG = new Float64Array(n), sumB = new Float64Array(n);
+  const count = new Float64Array(n);
+  for (let i = 0; i < labels.length; i++) {
+    const l = labels[i];
+    if (l >= n) continue; // 255 transparent marker
+    sumR[l] += rgba[i * 4];
+    sumG[l] += rgba[i * 4 + 1];
+    sumB[l] += rgba[i * 4 + 2];
+    count[l]++;
+  }
+  return palette.map((c, l) => count[l] > 0
+    ? { r: Math.round(sumR[l] / count[l]), g: Math.round(sumG[l] / count[l]), b: Math.round(sumB[l] / count[l]), a: c.a }
+    : c);
+}
+
 export function colorToHex(color: Color): string {
   const toHex = (n: number) => n.toString(16).padStart(2, '0');
   return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`;

@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -120,6 +120,10 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       const nativeFloor = Math.max(4, Math.round(origWidth * origHeight * 5e-6) + 2);
       const nativeLabels = consolidateRegions(inked.quantized, origWidth, origHeight, finalPalette, Math.max(8, minArea), nativeFloor);
 
+      // Truer fills: recompute each palette entry as the mean of its actual pixels
+      // now that merging/consolidation has settled the label map.
+      const displayPalette = refreshPaletteFromLabels(nativeLabels, processedData, finalPalette);
+
       // Background / transparency masks (at native res).
       const foregroundMask: Uint8Array | null = removeBackground ? createForegroundMask(processedImgDataObj, 4) : null;
       let finalMask: Uint8Array | null = null;
@@ -161,7 +165,7 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         traceLabels,
         workingWidth,
         workingHeight,
-        finalPalette,
+        displayPalette,   // true per-label mean colours for the fills
         selectedSet,
         smoothness,
         traceMinArea,
@@ -177,7 +181,7 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
 
       self.postMessage({
         type: 'complete',
-        palette: finalPalette,
+        palette: displayPalette,
         pathData,
         svgContent,
         width: origWidth,

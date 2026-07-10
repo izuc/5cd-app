@@ -285,6 +285,293 @@ function refinePathMultiStage(
   return points;
 }
 
+// ============ Least-squares cubic bezier fitting (Schneider, Graphics Gems) ============
+// Fitting cubics across RUNS of dense boundary points (instead of anchoring a curve
+// at every polyline vertex) averages residual boundary noise away perpendicular to
+// the curve — smoother, crisper edges AND fewer path nodes. Corners are exact
+// segment breaks so type stays sharp.
+
+type Seg = { c1: Point; c2: Point; p2: Point; line?: boolean };
+
+const dot = (a: Point, b: Point) => a.x * b.x + a.y * b.y;
+const sub = (a: Point, b: Point): Point => ({ x: a.x - b.x, y: a.y - b.y });
+const add = (a: Point, b: Point): Point => ({ x: a.x + b.x, y: a.y + b.y });
+const scale = (a: Point, s: number): Point => ({ x: a.x * s, y: a.y * s });
+const norm = (a: Point): Point => {
+  const l = Math.hypot(a.x, a.y);
+  return l > 1e-12 ? { x: a.x / l, y: a.y / l } : { x: 0, y: 0 };
+};
+
+// de Casteljau evaluation of a cubic given its 4 control points
+function bezierPoint(v0: Point, v1: Point, v2: Point, v3: Point, t: number): Point {
+  const mt = 1 - t;
+  const a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
+  return { x: a * v0.x + b * v1.x + c * v2.x + d * v3.x, y: a * v0.y + b * v1.y + c * v2.y + d * v3.y };
+}
+
+function chordLengthParameterize(pts: Point[], first: number, last: number): number[] {
+  const u = [0];
+  for (let i = first + 1; i <= last; i++) {
+    u.push(u[i - first - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  }
+  const total = u[u.length - 1] || 1;
+  for (let i = 0; i < u.length; i++) u[i] /= total;
+  return u;
+}
+
+// Least-squares solve for the two inner control points given end tangents.
+function generateBezier(pts: Point[], first: number, last: number, u: number[], tHat1: Point, tHat2: Point): [Point, Point, Point, Point] {
+  const p0 = pts[first], p3 = pts[last];
+  let c00 = 0, c01 = 0, c11 = 0, x0 = 0, x1 = 0;
+
+  for (let i = 0; i < u.length; i++) {
+    const t = u[i], mt = 1 - t;
+    const b0 = mt * mt * mt, b1 = 3 * mt * mt * t, b2 = 3 * mt * t * t, b3 = t * t * t;
+    const a1 = scale(tHat1, b1);
+    const a2 = scale(tHat2, b2);
+    c00 += dot(a1, a1);
+    c01 += dot(a1, a2);
+    c11 += dot(a2, a2);
+    const tmp = sub(pts[first + i], add(scale(p0, b0 + b1), scale(p3, b2 + b3)));
+    x0 += dot(a1, tmp);
+    x1 += dot(a2, tmp);
+  }
+
+  const det = c00 * c11 - c01 * c01;
+  let alpha1 = 0, alpha2 = 0;
+  if (Math.abs(det) > 1e-12) {
+    alpha1 = (x0 * c11 - x1 * c01) / det;
+    alpha2 = (c00 * x1 - c01 * x0) / det;
+  }
+  const segLen = Math.hypot(p3.x - p0.x, p3.y - p0.y);
+  // Wu/Barsky heuristic fallback for degenerate/negative solutions
+  if (alpha1 < 1e-6 * segLen || alpha2 < 1e-6 * segLen) {
+    alpha1 = alpha2 = segLen / 3;
+  }
+  return [p0, add(p0, scale(tHat1, alpha1)), add(p3, scale(tHat2, alpha2)), p3];
+}
+
+// Max squared deviation of the points from the fitted curve (+ split index)
+function computeMaxError(pts: Point[], first: number, last: number, bez: [Point, Point, Point, Point], u: number[]): { maxDist: number; split: number } {
+  let maxDist = 0;
+  let split = (last - first + 1) >> 1;
+  for (let i = first + 1; i < last; i++) {
+    const p = bezierPoint(bez[0], bez[1], bez[2], bez[3], u[i - first]);
+    const d = (p.x - pts[i].x) ** 2 + (p.y - pts[i].y) ** 2;
+    if (d > maxDist) { maxDist = d; split = i; }
+  }
+  return { maxDist, split };
+}
+
+// One Newton-Raphson step refining each point's curve parameter
+function reparameterize(pts: Point[], first: number, u: number[], bez: [Point, Point, Point, Point]): number[] {
+  const out = new Array<number>(u.length);
+  const [v0, v1, v2, v3] = bez;
+  // derivative control points
+  const d1 = [scale(sub(v1, v0), 3), scale(sub(v2, v1), 3), scale(sub(v3, v2), 3)];
+  const d2 = [scale(sub(d1[1], d1[0]), 2), scale(sub(d1[2], d1[1]), 2)];
+  for (let i = 0; i < u.length; i++) {
+    const t = u[i], mt = 1 - t;
+    const q = bezierPoint(v0, v1, v2, v3, t);
+    const q1 = { x: mt * mt * d1[0].x + 2 * mt * t * d1[1].x + t * t * d1[2].x, y: mt * mt * d1[0].y + 2 * mt * t * d1[1].y + t * t * d1[2].y };
+    const q2 = { x: mt * d2[0].x + t * d2[1].x, y: mt * d2[0].y + t * d2[1].y };
+    const diff = sub(q, pts[first + i]);
+    const num = dot(diff, q1);
+    const den = dot(q1, q1) + dot(diff, q2);
+    out[i] = Math.abs(den) > 1e-12 ? t - num / den : t;
+    if (out[i] < 0) out[i] = 0; else if (out[i] > 1) out[i] = 1;
+  }
+  return out;
+}
+
+function centerTangent(pts: Point[], i: number): Point {
+  const a = pts[i - 1], b = pts[i + 1];
+  return norm({ x: a.x - b.x, y: a.y - b.y });
+}
+
+function fitCubic(pts: Point[], first: number, last: number, tHat1: Point, tHat2: Point, errSq: number, out: Seg[], depth: number): void {
+  const n = last - first + 1;
+  if (n <= 2 || depth > 24) {
+    out.push({ c1: pts[first], c2: pts[last], p2: pts[last], line: true });
+    return;
+  }
+  let u = chordLengthParameterize(pts, first, last);
+  let bez = generateBezier(pts, first, last, u, tHat1, tHat2);
+  let { maxDist, split } = computeMaxError(pts, first, last, bez, u);
+
+  if (maxDist > errSq && maxDist < errSq * 16) {
+    for (let it = 0; it < 3; it++) {
+      u = reparameterize(pts, first, u, bez);
+      bez = generateBezier(pts, first, last, u, tHat1, tHat2);
+      const r = computeMaxError(pts, first, last, bez, u);
+      maxDist = r.maxDist; split = r.split;
+      if (maxDist <= errSq) break;
+    }
+  }
+  if (maxDist <= errSq) {
+    out.push({ c1: bez[1], c2: bez[2], p2: bez[3] });
+    return;
+  }
+
+  // split at the worst point and recurse with a smooth centre tangent
+  if (split <= first) split = first + 1;
+  if (split >= last) split = last - 1;
+  const tC = centerTangent(pts, split);
+  fitCubic(pts, first, split, tHat1, tC, errSq, out, depth + 1);
+  fitCubic(pts, split, last, scale(tC, -1), tHat2, errSq, out, depth + 1);
+}
+
+// RDP variant that returns the INDICES of the kept vertices (structure detection)
+function rdpIndices(points: Point[], first: number, last: number, tolSq: number, keep: number[]): void {
+  let maxDist = 0, idx = -1;
+  const a = points[first], b = points[last];
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const l2 = dx * dx + dy * dy;
+  for (let i = first + 1; i < last; i++) {
+    const p = points[i];
+    let d: number;
+    if (l2 === 0) d = (p.x - a.x) ** 2 + (p.y - a.y) ** 2;
+    else {
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      d = (p.x - (a.x + t * dx)) ** 2 + (p.y - (a.y + t * dy)) ** 2;
+    }
+    if (d > maxDist) { maxDist = d; idx = i; }
+  }
+  if (maxDist > tolSq && idx > 0) {
+    rdpIndices(points, first, idx, tolSq, keep);
+    keep.push(idx);
+    rdpIndices(points, idx, last, tolSq, keep);
+  }
+}
+
+// Convert one closed dense contour into path segments: structural corners become
+// exact breaks; the runs between them are least-squares fitted with cubics (or a
+// straight line when the run is essentially straight).
+function fitContour(dense: Point[], errSq: number): { start: Point; segs: Seg[] } | null {
+  // dedupe consecutive duplicates (Moore trace can revisit)
+  const pts: Point[] = [];
+  for (const p of dense) {
+    const l = pts[pts.length - 1];
+    if (!l || Math.abs(l.x - p.x) > 1e-9 || Math.abs(l.y - p.y) > 1e-9) pts.push(p);
+  }
+  if (pts.length > 1) {
+    const f = pts[0], l = pts[pts.length - 1];
+    if (Math.abs(f.x - l.x) < 1e-9 && Math.abs(f.y - l.y) < 1e-9) pts.pop();
+  }
+  const n = pts.length;
+  if (n < 3) return null;
+
+  // Structural vertices via index-tracking RDP over the closed loop (split at 0 and
+  // the far point so the recursion has endpoints).
+  const far = n >> 1;
+  const keep: number[] = [0];
+  rdpIndices(pts, 0, far, errSq * 4, keep);
+  keep.push(far);
+  rdpIndices(pts, far, n - 1, errSq * 4, keep);
+
+  // Corners = structural vertices with a sharp turn (measured between neighbouring
+  // structural vertices, so dense-point jitter can't fake an angle).
+  const breaks: number[] = [];
+  for (let k = 0; k < keep.length; k++) {
+    const iPrev = keep[(k - 1 + keep.length) % keep.length];
+    const i = keep[k];
+    const iNext = keep[(k + 1) % keep.length];
+    const angle = getAngle(pts[iPrev], pts[i], pts[iNext]);
+    if (angle < Math.PI - Math.PI / 3) breaks.push(i); // > 60 deg turn
+  }
+  // Need at least two breaks for closed-loop fitting; synthesize if the shape is
+  // entirely smooth (e.g. a circle).
+  if (breaks.length === 0) breaks.push(0, far);
+  else if (breaks.length === 1) breaks.push((breaks[0] + far) % n);
+  breaks.sort((a, b) => a - b);
+
+  const segs: Seg[] = [];
+  for (let k = 0; k < breaks.length; k++) {
+    const i0 = breaks[k];
+    const i1 = breaks[(k + 1) % breaks.length];
+    // unwrap the run i0..i1 (possibly crossing the loop seam)
+    const run: Point[] = [];
+    for (let i = i0; ; i = (i + 1) % n) {
+      run.push(pts[i]);
+      if (i === i1) break;
+    }
+    if (run.length < 2) continue;
+    if (run.length === 2) {
+      segs.push({ c1: run[0], c2: run[1], p2: run[1], line: true });
+      continue;
+    }
+    // straight run? max deviation from chord below tolerance -> single line
+    let straight = true;
+    const a = run[0], b = run[run.length - 1];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    for (let i = 1; i < run.length - 1 && straight; i++) {
+      const p = run[i];
+      let d: number;
+      if (l2 === 0) d = (p.x - a.x) ** 2 + (p.y - a.y) ** 2;
+      else {
+        let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        d = (p.x - (a.x + t * dx)) ** 2 + (p.y - (a.y + t * dy)) ** 2;
+      }
+      if (d > errSq) straight = false;
+    }
+    if (straight) {
+      segs.push({ c1: a, c2: b, p2: b, line: true });
+      continue;
+    }
+    // one-sided end tangents (corner = C0 break keeps corners crisp)
+    const tHat1 = norm(sub(run[Math.min(2, run.length - 1)], run[0]));
+    const tHat2 = norm(sub(run[Math.max(run.length - 3, 0)], run[run.length - 1]));
+    fitCubic(run, 0, run.length - 1, tHat1, tHat2, errSq, segs, 0);
+  }
+  if (!segs.length) return null;
+  return { start: pts[breaks[0]], segs };
+}
+
+function segsToPath(start: Point, segs: Seg[]): string {
+  const f = (v: number) => Math.round(v * 10) / 10;
+  let d = `M${f(start.x)},${f(start.y)}`;
+  for (const s of segs) {
+    if (s.line) d += `L${f(s.p2.x)},${f(s.p2.y)}`;
+    else d += `C${f(s.c1.x)},${f(s.c1.y)} ${f(s.c2.x)},${f(s.c2.y)} ${f(s.p2.x)},${f(s.p2.y)}`;
+  }
+  return d + 'Z';
+}
+
+// Full contour -> path-string pipeline used by the tracer for balanced/high/detailed:
+// light jitter smoothing, winding normalisation, then least-squares cubic fitting.
+function contourToPath(
+  boundary: Point[],
+  smoothness: number,
+  qualityLevel: 'fast' | 'balanced' | 'high' | 'detailed',
+  simplifyScale: number,
+  regionThickness: number
+): string {
+  let pts = boundary;
+  if (qualityLevel !== 'fast') {
+    const none = new Set<number>();
+    pts = smoothPathPreservingCorners(pts, none, qualityLevel === 'detailed' ? 1 : 2, qualityLevel === 'detailed' ? 0.1 : 0.2);
+  }
+  pts = ensureClockwise(pts);
+
+  const qualityTol = qualityLevel === 'detailed' ? Math.max(0.4, smoothness * 0.12)
+    : qualityLevel === 'balanced' ? Math.max(0.6, smoothness * 0.22)
+    : Math.max(0.5, smoothness * 0.18); // high
+  let tol = qualityTol * simplifyScale;
+  if (Number.isFinite(regionThickness)) {
+    tol = Math.min(tol, Math.max(0.5 * simplifyScale, regionThickness * 0.3));
+  }
+  const fitted = fitContour(pts, tol * tol);
+  if (!fitted) {
+    // degenerate contour — fall back to the legacy polyline path
+    const corners = detectCorners(pts, Math.PI / 3);
+    return pointsToSvgPathOptimized(pts, corners);
+  }
+  return segsToPath(fitted.start, fitted.segs);
+}
+
 // Generate compact path using integer coordinates and smooth bezier curves
 function pointsToSvgPathOptimized(points: Point[], corners: Set<number>): string {
   if (points.length < 2) return '';
@@ -935,24 +1222,34 @@ export function traceAllColors(
           for (const h of holes) boundaryTotal += h.boundary.length;
           const regionThickness = (2 * pixelCount) / boundaryTotal;
 
-          // Use multi-stage refinement pipeline
-          let refined = refinePathMultiStage(boundary, smoothness, qualityLevel, simplifyScale, regionThickness);
+          const useFit = qualityLevel !== 'fast';
 
-          // Ensure consistent clockwise winding for proper SVG fill behavior
-          refined = ensureClockwise(refined);
-
-          // Detect corners for optimized Bezier generation
-          const corners = detectCorners(refined, Math.PI / 3);
-          let pathStr = pointsToSvgPathOptimized(refined, corners);
+          let pathStr: string;
+          if (useFit) {
+            // Least-squares cubic fitting across corner-to-corner runs (see
+            // contourToPath) — smooths boundary noise the polyline pipeline keeps.
+            pathStr = contourToPath(boundary, smoothness, qualityLevel, simplifyScale, regionThickness);
+          } else {
+            // FAST: legacy polyline pipeline (RDP + heuristic beziers)
+            let refined = refinePathMultiStage(boundary, smoothness, qualityLevel, simplifyScale, regionThickness);
+            refined = ensureClockwise(refined);
+            const corners = detectCorners(refined, Math.PI / 3);
+            pathStr = pointsToSvgPathOptimized(refined, corners);
+          }
           if (!pathStr) continue;
 
           let hasHoles = false;
           for (const h of holes) {
             const holeThickness = (2 * h.size) / h.boundary.length;
-            const hRefined = refinePathMultiStage(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
-            if (hRefined.length < 3) continue;
-            const hCorners = detectCorners(hRefined, Math.PI / 3);
-            const hPath = pointsToSvgPathOptimized(hRefined, hCorners);
+            let hPath: string;
+            if (useFit) {
+              hPath = contourToPath(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
+            } else {
+              const hRefined = refinePathMultiStage(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
+              if (hRefined.length < 3) continue;
+              const hCorners = detectCorners(hRefined, Math.PI / 3);
+              hPath = pointsToSvgPathOptimized(hRefined, hCorners);
+            }
             if (hPath) {
               pathStr += hPath;
               hasHoles = true;
