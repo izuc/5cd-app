@@ -1089,53 +1089,93 @@ function fitShapeGradient(
   const dl = Math.hypot(dx, dy);
   dx /= dl; dy /= dl;
 
-  // Project every sample onto the axis; endpoints come from the OBSERVED
-  // extremes (bbox corners extrapolate on diagonal/L-shaped regions).
   const mx = g.sx / g.n, my = g.sy / g.n;
-  let tmin = Infinity, tmax = -Infinity;
+  const K = 12;
+
+  // Bin the samples along whatever 1-D parameterisation is in tBuf and return
+  // the profile residual (within-bin variance) + stop-candidate points with t
+  // normalised to [0,1]. Bin means are actual pixel means — no clamping needed.
+  type P = { t: number; r: number; g: number; b: number };
+  const bn = new Float64Array(K);
+  const bsc = [new Float64Array(K), new Float64Array(K), new Float64Array(K)];
+  const bscc = [new Float64Array(K), new Float64Array(K), new Float64Array(K)];
+  const buildProfile = (tmin: number, tmax: number): { sse: number; pts: P[] } | null => {
+    if (!(tmax - tmin >= 6)) return null; // ramp too short to matter
+    bn.fill(0);
+    for (let ch = 0; ch < 3; ch++) { bsc[ch].fill(0); bscc[ch].fill(0); }
+    const tspan = tmax - tmin;
+    for (let k = 0; k < g.n; k++) {
+      const bi = Math.min(K - 1, (((tBuf[k] - tmin) / tspan) * K) | 0);
+      const i4 = samples[k] * 4;
+      bn[bi]++;
+      for (let ch = 0; ch < 3; ch++) {
+        const v = rgba[i4 + ch];
+        bsc[ch][bi] += v; bscc[ch][bi] += v * v;
+      }
+    }
+    let sse = 0;
+    for (let bi = 0; bi < K; bi++) {
+      if (bn[bi] === 0) continue;
+      for (let ch = 0; ch < 3; ch++) sse += Math.max(0, bscc[ch][bi] - (bsc[ch][bi] * bsc[ch][bi]) / bn[bi]);
+    }
+    const pts: P[] = [];
+    for (let bi = 0; bi < K; bi++) {
+      if (bn[bi] < Math.max(2, g.n / (K * 20))) continue; // starved bin — unreliable mean
+      pts.push({ t: (bi + 0.5) / K, r: bsc[0][bi] / bn[bi], g: bsc[1][bi] / bn[bi], b: bsc[2][bi] / bn[bi] });
+    }
+    if (pts.length < 2) return null;
+    return { sse, pts };
+  };
+
+  // LINEAR: project every sample onto the plane-fit axis; endpoints come from
+  // the OBSERVED extremes (bbox corners extrapolate on diagonal/L-shaped regions).
+  let ltmin = Infinity, ltmax = -Infinity;
   for (let k = 0; k < g.n; k++) {
     const i = samples[k];
     const t = dx * ((i % srcW) - mx) + dy * (((i / srcW) | 0) - my);
     tBuf[k] = t;
-    if (t < tmin) tmin = t;
-    if (t > tmax) tmax = t;
+    if (t < ltmin) ltmin = t;
+    if (t > ltmax) ltmax = t;
   }
-  if (!(tmax - tmin >= 6)) return undefined; // ramp too short to matter
+  const linearP = buildProfile(ltmin, ltmax);
 
-  // 1-D profile: binned channel means along the axis.
-  const K = 12;
-  const bn = new Float64Array(K);
-  const bsc = [new Float64Array(K), new Float64Array(K), new Float64Array(K)];
-  const bscc = [new Float64Array(K), new Float64Array(K), new Float64Array(K)];
-  const tspan = tmax - tmin;
+  // RADIAL: distance from a deviation-weighted centre — for a glow/halo the
+  // pixels that differ most from the mean ARE the anomaly core, so weighting
+  // the centroid by squared colour deviation lands the centre on it. A wrong
+  // centre (asymmetric shapes) just produces a poor profile and loses the SSE
+  // comparison below — conservative by construction.
+  const cmR = g.sc[0] / g.n, cmG = g.sc[1] / g.n, cmB = g.sc[2] / g.n;
+  let wSum = 0, wxs = 0, wys = 0;
   for (let k = 0; k < g.n; k++) {
-    const bi = Math.min(K - 1, (((tBuf[k] - tmin) / tspan) * K) | 0);
     const i4 = samples[k] * 4;
-    bn[bi]++;
-    for (let ch = 0; ch < 3; ch++) {
-      const v = rgba[i4 + ch];
-      bsc[ch][bi] += v; bscc[ch][bi] += v * v;
-    }
+    const dr = rgba[i4] - cmR, dg = rgba[i4 + 1] - cmG, db = rgba[i4 + 2] - cmB;
+    const w = dr * dr + dg * dg + db * db;
+    const i = samples[k];
+    wSum += w; wxs += w * (i % srcW); wys += w * ((i / srcW) | 0);
   }
-  // Profile residual = within-bin variance; the profile must genuinely explain
-  // the component's variation or a flat fill is more honest.
-  let sseProfile = 0;
-  for (let bi = 0; bi < K; bi++) {
-    if (bn[bi] === 0) continue;
-    for (let ch = 0; ch < 3; ch++) sseProfile += Math.max(0, bscc[ch][bi] - (bsc[ch][bi] * bsc[ch][bi]) / bn[bi]);
+  const rcx = wSum > 1e-9 ? wxs / wSum : mx;
+  const rcy = wSum > 1e-9 ? wys / wSum : my;
+  let rmax = 0;
+  for (let k = 0; k < g.n; k++) {
+    const i = samples[k];
+    const t = Math.hypot((i % srcW) - rcx, ((i / srcW) | 0) - rcy);
+    tBuf[k] = t;
+    if (t > rmax) rmax = t;
   }
-  if (!(sseProfile <= 0.55 * sseFlat)) return undefined;
+  const radialP = buildProfile(0, rmax);
 
-  // Stop candidates: non-empty bin means at their bin centres, endpoints pinned
-  // to t=0 / t=1. Bin means are actual pixel means, so no range clamping needed.
-  type P = { t: number; r: number; g: number; b: number };
-  const pts: P[] = [];
-  for (let bi = 0; bi < K; bi++) {
-    if (bn[bi] < Math.max(2, g.n / (K * 20))) continue; // starved bin — unreliable mean
-    pts.push({ t: (bi + 0.5) / K, r: bsc[0][bi] / bn[bi], g: bsc[1][bi] / bn[bi], b: bsc[2][bi] / bn[bi] });
-  }
-  if (pts.length < 2) return undefined;
-  pts[0].t = 0;
+  // Pick the model that explains the pixels better (radial needs a clear win —
+  // linear is the safer default for ambiguous shapes), then gate vs flat fill:
+  // the profile must genuinely explain the variation or a flat fill is more
+  // honest — textured regions keep high within-bin variance and stay flat.
+  const useRadial = !!radialP && (!linearP || radialP.sse < 0.9 * linearP.sse);
+  const chosen = useRadial ? radialP! : linearP;
+  if (!chosen) return undefined;
+  if (!(chosen.sse <= 0.55 * sseFlat)) return undefined;
+  const pts = chosen.pts;
+  // Pin the profile ends: linear stretches to both endpoints; radial offsets
+  // are fractions of r from the centre, and SVG pads inward from the first stop.
+  if (!useRadial) pts[0].t = 0;
   pts[pts.length - 1].t = 1;
 
   // Visible ramp span across the whole profile.
@@ -1176,10 +1216,12 @@ function fitShapeGradient(
   }));
 
   const r1 = (v: number) => Math.round(v * 10) / 10;
+  if (useRadial) {
+    return { stops, radial: { cx: r1(rcx), cy: r1(rcy), r: r1(rmax) } };
+  }
   return {
-    x1: r1(mx + dx * tmin), y1: r1(my + dy * tmin),
-    x2: r1(mx + dx * tmax), y2: r1(my + dy * tmax),
     stops,
+    linear: { x1: r1(mx + dx * ltmin), y1: r1(my + dy * ltmin), x2: r1(mx + dx * ltmax), y2: r1(my + dy * ltmax) },
   };
 }
 
@@ -1580,15 +1622,25 @@ export function generateSvg(
   // invisible over the gradient.
   const gradDefs: string[] = [];
   const paintFor = (hex: string, gradient?: ShapeGradient): string => {
-    if (!gradient) return hex;
+    if (!gradient || (!gradient.linear && !gradient.radial)) return hex;
     const id = `lg${gradDefs.length}`;
     let stops = '';
     for (const s of gradient.stops) stops += `<stop offset="${s.t}" stop-color="${colorToHex(s.c)}"/>`;
-    gradDefs.push(
-      `    <linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${gradient.x1}" y1="${gradient.y1}" x2="${gradient.x2}" y2="${gradient.y2}">` +
-      stops +
-      `</linearGradient>\n`
-    );
+    if (gradient.radial) {
+      const rg = gradient.radial;
+      gradDefs.push(
+        `    <radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${rg.cx}" cy="${rg.cy}" r="${rg.r}">` +
+        stops +
+        `</radialGradient>\n`
+      );
+    } else {
+      const lg = gradient.linear!;
+      gradDefs.push(
+        `    <linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${lg.x1}" y1="${lg.y1}" x2="${lg.x2}" y2="${lg.y2}">` +
+        stops +
+        `</linearGradient>\n`
+      );
+    }
     return `url(#${id})`;
   };
 

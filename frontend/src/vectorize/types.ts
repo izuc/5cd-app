@@ -16,15 +16,14 @@ export interface Point {
 }
 
 // Colour ramp fitted to a shape's underlying pixels. Coordinates are in the
-// OUTPUT viewBox (native) space; endpoints are the ramp's extreme points along
-// the fitted direction. `stops` (t ascending in [0,1]) carry the 1-D colour
-// profile — more than two stops when the ramp is curved (specular sheens).
+// OUTPUT viewBox (native) space. `stops` (t ascending in [0,1]) carry the 1-D
+// colour profile — more than two stops when the ramp is curved (specular
+// sheens). Exactly one of `linear` (axis endpoints) or `radial` (glow centre +
+// radius) is set, whichever profile model explained the shape's pixels better.
 export interface ShapeGradient {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
   stops: Array<{ t: number; c: Color }>;
+  linear?: { x1: number; y1: number; x2: number; y2: number };
+  radial?: { cx: number; cy: number; r: number };
 }
 
 export interface ShapeData {
