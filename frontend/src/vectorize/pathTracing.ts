@@ -219,19 +219,40 @@ function refinePathMultiStage(
   rawPoints: Point[],
   smoothness: number,
   qualityLevel: 'fast' | 'balanced' | 'high' | 'detailed' = 'balanced',
-  simplifyScale: number = 1
+  simplifyScale: number = 1,
+  regionThickness: number = Infinity
 ): Point[] {
   if (rawPoints.length < 3) return rawPoints;
 
   let points = rawPoints;
 
-  // Detect corners before any smoothing
+  // Pre-smooth BEFORE corner detection (except fast mode). Pixel-boundary jitter
+  // reads as sharp angles, so detecting corners on the raw trace marks noise as
+  // "corners" which the corner-preserving smoother then faithfully keeps — ragged
+  // type edges. True corners are supported by long runs on both sides and survive
+  // two plain smoothing passes; jitter does not.
+  if (qualityLevel !== 'fast') {
+    const none = new Set<number>();
+    points = smoothPathPreservingCorners(points, none, qualityLevel === 'detailed' ? 1 : 2, qualityLevel === 'detailed' ? 0.1 : 0.2);
+  }
+
+  // Detect corners after the jitter has been smoothed away
   const cornerAngleThreshold = Math.PI / 3; // 60 degrees
   const corners = detectCorners(points, cornerAngleThreshold);
 
+  // Cap the RDP tolerance for THIN regions (outlines, strokes): a tolerance close to
+  // the region's half-width lets the two sides of the polygon collapse into or across
+  // each other — long thin outlines turn into pinched "sausage link" chains. Scale the
+  // cap to the region thickness (≈ 2·area/perimeter, in working px) so wide regions
+  // keep the full smoothing tolerance.
+  const thicknessCap = Number.isFinite(regionThickness)
+    ? Math.max(0.5 * simplifyScale, regionThickness * 0.3)
+    : Infinity;
+  const tol = (base: number) => Math.min(base * simplifyScale, thicknessCap);
+
   if (qualityLevel === 'fast') {
     // Fast: aggressive simplification
-    const simplified = simplifyPath(points, Math.max(1.0, smoothness * 0.3) * simplifyScale);
+    const simplified = simplifyPath(points, tol(Math.max(1.0, smoothness * 0.3)));
     if (simplified.length < 3) return rawPoints;
     return simplified;
   }
@@ -241,7 +262,7 @@ function refinePathMultiStage(
     // Almost no smoothing - preserve original traced edges
     points = smoothPathPreservingCorners(points, corners, 1, 0.02);
     // Minimal simplification - keep nearly all points for sharp text
-    points = simplifyPath(points, Math.max(0.1, smoothness * 0.05) * simplifyScale);
+    points = simplifyPath(points, tol(Math.max(0.1, smoothness * 0.05)));
 
     if (points.length < 3) return rawPoints;
     return points;
@@ -250,7 +271,7 @@ function refinePathMultiStage(
   if (qualityLevel === 'balanced') {
     // Balanced: moderate smoothing, good detail
     points = smoothPathPreservingCorners(points, corners, 1, 0.12);
-    points = simplifyPath(points, Math.max(0.5, smoothness * 0.2) * simplifyScale);
+    points = simplifyPath(points, tol(Math.max(0.5, smoothness * 0.2)));
 
     if (points.length < 3) return rawPoints;
     return points;
@@ -258,7 +279,7 @@ function refinePathMultiStage(
 
   // HIGH QUALITY: Good balance of smoothness and detail
   points = smoothPathPreservingCorners(points, corners, 1, 0.15);
-  points = simplifyPath(points, Math.max(0.4, smoothness * 0.15) * simplifyScale);
+  points = simplifyPath(points, tol(Math.max(0.4, smoothness * 0.15)));
 
   if (points.length < 3) return rawPoints;
   return points;
@@ -304,8 +325,10 @@ function pointsToSvgPathOptimized(points: Point[], corners: Set<number>): string
     const isCorner1 = corners.has(i);
     const isCorner2 = corners.has((i + 1) % points.length);
 
-    const tension1 = isCorner1 ? 0.1 : 0.17;
-    const tension2 = isCorner2 ? 0.1 : 0.17;
+    // Corners are EXACT polygon vertices: zero tension into/out of a corner keeps
+    // type corners sharp instead of slightly rounding through them.
+    const tension1 = isCorner1 ? 0 : 0.17;
+    const tension2 = isCorner2 ? 0 : 0.17;
 
     const cp1x = p1.x + (p2.x - p0.x) * tension1;
     const cp1y = p1.y + (p2.y - p0.y) * tension1;
@@ -316,9 +339,11 @@ function pointsToSvgPathOptimized(points: Point[], corners: Set<number>): string
     // If control points are very close to the line segment p1-p2, use L instead of C
     const cp1 = { x: cp1x, y: cp1y };
     const cp2 = { x: cp2x, y: cp2y };
-    const errorThreshold = 0.5; // pixels squared (approx 0.7px distance)
+    // squared px: ~1.3px — snaps micro-wobbly near-straight runs (glyph stems, box
+    // edges) to clean lines; genuine curves deviate far more than this.
+    const errorThreshold = 1.7;
 
-    if (distToSegmentSquared(cp1, p1, p2) < errorThreshold && 
+    if (distToSegmentSquared(cp1, p1, p2) < errorThreshold &&
         distToSegmentSquared(cp2, p1, p2) < errorThreshold) {
       d += `L${r(p2.x)},${r(p2.y)}`;
     } else {
@@ -525,13 +550,12 @@ export function traceRegionBoundary(
   return boundary;
 }
 
-// Trace boundary on a binary mask (1 = inside, 0 = outside)
-function traceMaskBoundary(
-  mask: Uint8Array,
-  width: number,
-  height: number,
+// Moore-neighbour boundary trace against an arbitrary inside-predicate.
+function traceBoundaryPredicate(
+  isInside: (x: number, y: number) => boolean,
   startX: number,
-  startY: number
+  startY: number,
+  maxIter: number
 ): Point[] {
   const boundary: Point[] = [];
   let curX = startX;
@@ -543,12 +567,6 @@ function traceMaskBoundary(
   let prevY = curY;
 
   let iter = 0;
-  const maxIter = width * height * 2;
-
-  const isInside = (x: number, y: number) => {
-    if (x < 0 || x >= width || y < 0 || y >= height) return false;
-    return mask[y * width + x] === 1;
-  };
 
   while (iter < maxIter) {
     let startNeighborIdx = 0;
@@ -592,6 +610,108 @@ function traceMaskBoundary(
   }
 
   return boundary;
+}
+
+// Trace boundary on a binary mask (1 = inside, 0 = outside)
+function traceMaskBoundary(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  startX: number,
+  startY: number
+): Point[] {
+  const isInside = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    return mask[y * width + x] === 1;
+  };
+  return traceBoundaryPredicate(isInside, startX, startY, width * height * 2);
+}
+
+// Find the HOLES of a connected component: complement cells (any other label /
+// colour) that are fully enclosed by the component, i.e. not reachable from the
+// component's padded bbox ring without crossing it. Returns each hole's size and
+// its Moore-traced boundary. Component pixels are identified via compIdMap==compId.
+function extractHoles(
+  compIdMap: Int32Array,
+  compId: number,
+  width: number,
+  height: number,
+  bx0: number, by0: number, bx1: number, by1: number,
+  holeMinArea: number
+): Array<{ size: number; boundary: Point[] }> {
+  const holes: Array<{ size: number; boundary: Point[] }> = [];
+  // Pad by 1 (clamped) so the "outside" flood can wrap around the component.
+  const hx0 = Math.max(0, bx0 - 1), hy0 = Math.max(0, by0 - 1);
+  const hx1 = Math.min(width - 1, bx1 + 1), hy1 = Math.min(height - 1, by1 + 1);
+  const hw = hx1 - hx0 + 1, hh = hy1 - hy0 + 1;
+  if (hw < 3 || hh < 3) return holes;
+
+  // 0 = unclassified, 1 = outside, >=2 = hole id
+  const lab = new Uint16Array(hw * hh);
+  const queue: number[] = [];
+
+  const seed = (gx: number, gy: number) => {
+    const li = (gy - hy0) * hw + (gx - hx0);
+    if (lab[li] === 0 && compIdMap[gy * width + gx] !== compId) {
+      lab[li] = 1;
+      queue.push(li);
+    }
+  };
+  for (let gx = hx0; gx <= hx1; gx++) { seed(gx, hy0); seed(gx, hy1); }
+  for (let gy = hy0; gy <= hy1; gy++) { seed(hx0, gy); seed(hx1, gy); }
+
+  // BFS (4-connected — the correct dual of the 8-connected component) marking
+  // everything reachable from the ring as outside.
+  let qp = 0;
+  while (qp < queue.length) {
+    const li = queue[qp++];
+    const lx = li % hw, ly = (li / hw) | 0;
+    // left
+    if (lx > 0 && lab[li - 1] === 0 && compIdMap[(ly + hy0) * width + (lx - 1 + hx0)] !== compId) { lab[li - 1] = 1; queue.push(li - 1); }
+    // right
+    if (lx < hw - 1 && lab[li + 1] === 0 && compIdMap[(ly + hy0) * width + (lx + 1 + hx0)] !== compId) { lab[li + 1] = 1; queue.push(li + 1); }
+    // up
+    if (ly > 0 && lab[li - hw] === 0 && compIdMap[(ly - 1 + hy0) * width + (lx + hx0)] !== compId) { lab[li - hw] = 1; queue.push(li - hw); }
+    // down
+    if (ly < hh - 1 && lab[li + hw] === 0 && compIdMap[(ly + 1 + hy0) * width + (lx + hx0)] !== compId) { lab[li + hw] = 1; queue.push(li + hw); }
+  }
+
+  // Remaining unclassified complement cells are enclosed → group them into holes.
+  let nextHoleId = 2;
+  const holeQueue: number[] = [];
+  for (let ly = 0; ly < hh; ly++) {
+    for (let lx = 0; lx < hw; lx++) {
+      const li = ly * hw + lx;
+      if (lab[li] !== 0) continue;
+      if (compIdMap[(ly + hy0) * width + (lx + hx0)] === compId) continue;
+      if (nextHoleId >= 65535) return holes; // Uint16 id budget exhausted (pathological)
+      const hid = nextHoleId++;
+      lab[li] = hid;
+      holeQueue.length = 0;
+      holeQueue.push(li);
+      let size = 0;
+      let hp = 0;
+      while (hp < holeQueue.length) {
+        const ci = holeQueue[hp++];
+        size++;
+        const cx = ci % hw, cy = (ci / hw) | 0;
+        if (cx > 0 && lab[ci - 1] === 0 && compIdMap[(cy + hy0) * width + (cx - 1 + hx0)] !== compId) { lab[ci - 1] = hid; holeQueue.push(ci - 1); }
+        if (cx < hw - 1 && lab[ci + 1] === 0 && compIdMap[(cy + hy0) * width + (cx + 1 + hx0)] !== compId) { lab[ci + 1] = hid; holeQueue.push(ci + 1); }
+        if (cy > 0 && lab[ci - hw] === 0 && compIdMap[(cy - 1 + hy0) * width + (cx + hx0)] !== compId) { lab[ci - hw] = hid; holeQueue.push(ci - hw); }
+        if (cy < hh - 1 && lab[ci + hw] === 0 && compIdMap[(cy + 1 + hy0) * width + (cx + hx0)] !== compId) { lab[ci + hw] = hid; holeQueue.push(ci + hw); }
+      }
+      if (size < holeMinArea) continue; // parent fill covers micro-holes
+      // (lx,ly) is the topmost-leftmost cell of this hole — a valid Moore start.
+      const isInHole = (gx: number, gy: number) => {
+        if (gx < hx0 || gx > hx1 || gy < hy0 || gy > hy1) return false;
+        return lab[(gy - hy0) * hw + (gx - hx0)] === hid;
+      };
+      const boundary = traceBoundaryPredicate(isInHole, lx + hx0, ly + hy0, hw * hh * 2);
+      if (boundary.length > 2) holes.push({ size, boundary });
+    }
+  }
+
+  return holes;
 }
 
 // Identify colors that touch the image perimeter (kept for potential future use)
@@ -639,13 +759,20 @@ export function traceAllColors(
 
   let colorsProcessed = 0;
 
-  // Determine merge radius based on quality level
-  // Higher radius = more aggressive merging, fewer gaps between shapes
-  // Lower radius = more detail preservation (better for text)
-  // Detailed mode: no merging to preserve crisp text edges
-  const mergeRadius = mergeNeighbors
-    ? (qualityLevel === 'fast' ? 4 : qualityLevel === 'balanced' ? 2 : qualityLevel === 'high' ? 1 : 0)
-    : 0;
+  // Global component-id map shared across all colours (ids are unique and only ever
+  // grow, so it never needs resetting). Used by hole extraction to test membership
+  // of the CURRENT component, which per-colour `visited` can't (it accumulates).
+  const compIdMap = new Int32Array(width * height);
+  let compCounter = 0;
+
+  // Merge radius (morphological closing on each colour's mask before tracing).
+  // Only 'fast' keeps a little closing to cut shape count. For every quality level
+  // above it the closing is DISABLED: closing one colour's mask also bridges it
+  // ACROSS other colours' thin features (a 2px close covers any ≤4px line that
+  // crosses it), and those bridged shapes then paint over the line periodically —
+  // outlines rendered as "bead chains". The label map is already consolidated
+  // upstream, so tracing the exact per-pixel partition is both cleaner and safer.
+  const mergeRadius = mergeNeighbors && qualityLevel === 'fast' ? 2 : 0;
 
   // Process each color separately with optional merging
   for (const colorIndex of colorsToTrace) {
@@ -695,14 +822,16 @@ export function traceAllColors(
         if (processedMask[idx] === 1) {
           // Found a new region of this color!
 
-          // A. Trace Boundary on the processed mask
-          const boundary = traceMaskBoundary(processedMask, width, height, x, y);
-
-          // B. Flood Fill (8-connected) to mark this ENTIRE region as visited AND count area
+          // A. Flood Fill (8-connected) to mark this ENTIRE region as visited, count
+          // area and record the component id + bbox (needed for hole extraction).
           // Also track how many pixels are in the foreground mask (if provided)
           // Count original pixels (not dilated) for accurate area
+          compCounter++;
+          const compId = compCounter;
+          compIdMap[idx] = compId;
           let pixelCount = 0;
           let foregroundPixelCount = 0;
+          let cbx0 = x, cby0 = y, cbx1 = x, cby1 = y;
           const stack = [idx];
           visited[idx] = 1;
 
@@ -736,6 +865,9 @@ export function traceAllColors(
                  const nIdx = ny * width + nx;
                  if (!visited[nIdx] && processedMask[nIdx] === 1) {
                    visited[nIdx] = 1;
+                   compIdMap[nIdx] = compId;
+                   if (nx < cbx0) cbx0 = nx; if (nx > cbx1) cbx1 = nx;
+                   if (ny < cby0) cby0 = ny; if (ny > cby1) cby1 = ny;
                    // Count original color pixels for accurate area
                    if (colorMask[nIdx] === 1) {
                      pixelCount++;
@@ -748,6 +880,14 @@ export function traceAllColors(
                }
             }
           }
+
+          // Region too small to keep — skip before any boundary work.
+          if (pixelCount < minArea) continue;
+
+          // B. Trace the OUTER boundary. (x,y) is the topmost-leftmost pixel of the
+          // component, a valid Moore-trace start.
+          const boundary = traceMaskBoundary(processedMask, width, height, x, y);
+          if (boundary.length <= 2) continue;
 
           // Determine if this shape is foreground or background
           let isBackground: boolean;
@@ -780,27 +920,52 @@ export function traceAllColors(
             isBackground = touchesEdge;
           }
 
-          // C. Only keep path if area is sufficient
-          if (pixelCount >= minArea && boundary.length > 2) {
-            // Use multi-stage refinement pipeline
-            let refined = refinePathMultiStage(boundary, smoothness, qualityLevel, simplifyScale);
+          // C. Extract HOLES — complement areas fully enclosed by this component.
+          // Without them a ring/net-like shape is drawn as its filled outer hull and
+          // ERASES everything beneath its openings (painter's-order overdraw): once
+          // the cleanup stages produce large well-connected components, whole regions
+          // "white out". Each hole becomes an extra subpath and the shape is filled
+          // with fill-rule=evenodd, so z-order no longer matters for enclosed content.
+          const holes = extractHoles(compIdMap, compId, width, height, cbx0, cby0, cbx1, cby1, minArea);
 
-            // Ensure consistent clockwise winding for proper SVG fill behavior
-            refined = ensureClockwise(refined);
+          // Estimated stroke thickness of the region (working px): 2·area/perimeter
+          // over ALL contours. Thin regions (outlines) get a capped simplify tolerance
+          // so their two sides can't collapse into each other ("sausage" pinching).
+          let boundaryTotal = boundary.length;
+          for (const h of holes) boundaryTotal += h.boundary.length;
+          const regionThickness = (2 * pixelCount) / boundaryTotal;
 
-            // Detect corners for optimized Bezier generation
-            const corners = detectCorners(refined, Math.PI / 3);
-            const pathStr = pointsToSvgPathOptimized(refined, corners);
+          // Use multi-stage refinement pipeline
+          let refined = refinePathMultiStage(boundary, smoothness, qualityLevel, simplifyScale, regionThickness);
 
-            if (pathStr) {
-              result.push({
-                color: palette[colorIndex],
-                path: pathStr,
-                area: pixelCount,
-                isBackground
-              });
+          // Ensure consistent clockwise winding for proper SVG fill behavior
+          refined = ensureClockwise(refined);
+
+          // Detect corners for optimized Bezier generation
+          const corners = detectCorners(refined, Math.PI / 3);
+          let pathStr = pointsToSvgPathOptimized(refined, corners);
+          if (!pathStr) continue;
+
+          let hasHoles = false;
+          for (const h of holes) {
+            const holeThickness = (2 * h.size) / h.boundary.length;
+            const hRefined = refinePathMultiStage(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
+            if (hRefined.length < 3) continue;
+            const hCorners = detectCorners(hRefined, Math.PI / 3);
+            const hPath = pointsToSvgPathOptimized(hRefined, hCorners);
+            if (hPath) {
+              pathStr += hPath;
+              hasHoles = true;
             }
           }
+
+          result.push({
+            color: palette[colorIndex],
+            path: pathStr,
+            area: pixelCount,
+            isBackground,
+            hasHoles
+          });
         }
       }
     }
@@ -871,8 +1036,9 @@ function scalePathString(pathStr: string, scale: number): string {
   return pathStr.replace(/-?\d+\.?\d*/g, (match) => {
     const num = parseFloat(match);
     const scaled = num / scale;
-    // Round to integer for smaller file size
-    return Math.round(scaled).toString();
+    // One decimal place: integer rounding at the output viewBox added ±0.5px jitter
+    // to every anchor, visible as micro-wobble on shallow curves and long stems.
+    return (Math.round(scaled * 10) / 10).toString();
   });
 }
 
@@ -941,46 +1107,22 @@ export function generateSvg(
     // Include foreground shapes + small background shapes (interior details like letter holes)
 
     const smallShapeThreshold = width * height * 0.05; // 5% of image area
-    // Only punch a background-coloured enclosed region into a transparent hole if it's
-    // big enough to be a real counter (letter interior, donut hole). `shape.area` is in
-    // working (upscaled) pixels, so scale the threshold by pathScale². Tiny dominant-
-    // colour speckles INSIDE solid shapes (anti-alias dust) must NOT be punched, or the
-    // shape turns to swiss cheese — they're dropped and left covered by the shape below.
-    const holeMinArea = width * height * (pathScale * pathScale) * 0.0002;
-    type FShape = { hex: string; path: string; area: number; bbox: number[]; holes: string[] };
+    type FShape = { hex: string; path: string; area: number; hasHoles?: boolean };
     const drawn: FShape[] = [];
-    const holeShapes: { path: string; bbox: number[] }[] = [];
-
-    // Rough bbox from a path's coordinates (a superset — control points included —
-    // which is fine for hole-in-letter containment).
-    const bboxOf = (d: string): number[] => {
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      const nums = d.match(/-?\d+(?:\.\d+)?/g);
-      if (nums) for (let i = 0; i + 1 < nums.length; i += 2) {
-        const x = parseFloat(nums[i]), y = parseFloat(nums[i + 1]);
-        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
-      }
-      return [x0, y0, x1, y1];
-    };
 
     for (const shape of shapes) {
       const hex = colorToHex(shape.color);
       const isDominantBg = hex === dominantHex;
 
-      // An enclosed region in the background colour is a HOLE/counter (letter
-      // interiors, donut holes). Punch it out (fill-rule evenodd) so it's truly
-      // transparent instead of filled with the background colour — but only if it's
-      // large enough to be a genuine counter; tiny speckles are skipped (see above).
-      if (isDominantBg && !shape.isBackground) {
-        if (shape.area >= holeMinArea) {
-          holeShapes.push({ path: shape.path, bbox: bboxOf(shape.path) });
-        }
-        continue;
-      }
+      // An enclosed region in the background colour is a counter (letter interior,
+      // donut hole): skip drawing it. Every shape now carries its enclosed holes as
+      // evenodd subpaths, so the area underneath is genuinely transparent — no punch
+      // bookkeeping needed.
+      if (isDominantBg && !shape.isBackground) continue;
 
       const isSmallBackground = shape.isBackground && shape.area < smallShapeThreshold;
       if (!shape.isBackground || (isSmallBackground && !isDominantBg)) {
-        drawn.push({ hex, path: shape.path, area: shape.area, bbox: bboxOf(shape.path), holes: [] });
+        drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles });
       }
     }
 
@@ -988,35 +1130,20 @@ export function generateSvg(
     if (drawn.length === 0) {
       for (const shape of shapes) {
         const hex = colorToHex(shape.color);
-        if (hex !== dominantHex) drawn.push({ hex, path: shape.path, area: shape.area, bbox: bboxOf(shape.path), holes: [] });
+        if (hex !== dominantHex) drawn.push({ hex, path: shape.path, area: shape.area, hasHoles: shape.hasHoles });
       }
-    }
-
-    // Assign each hole to the SMALLEST drawn shape whose bbox contains it, and punch
-    // it out of that shape via fill-rule=evenodd. Self-contained per shape, so it
-    // works in the downloaded SVG AND the editor (which re-renders shapes) — no mask.
-    const contains = (o: number[], i: number[]) => o[0] <= i[0] && o[1] <= i[1] && o[2] >= i[2] && o[3] >= i[3];
-    for (const h of holeShapes) {
-      let best: FShape | null = null;
-      for (const s of drawn) if (contains(s.bbox, h.bbox) && (!best || s.area < best.area)) best = s;
-      if (best) best.holes.push(h.path); // unassigned holes are simply left transparent
     }
 
     // Sort by area descending (largest first, smallest/details on top)
     drawn.sort((a, b) => b.area - a.area);
 
     // Same-colour stroke bridges the anti-aliasing seam (the "white gaps"); see note
-    // in standard mode below. Proportional to the viewBox so it stays a constant
-    // on-screen thickness regardless of resolution.
-    const strokeWidth = Math.max(1.5, Math.min(width, height) * 0.004);
+    // in standard mode below.
+    const strokeWidth = Math.max(1, Math.min(width, height) * 0.0006);
     svg += `    <g id="shapes-layer">\n`;
     for (const s of drawn) {
-      let d = scalePathString(s.path, pathScale);
-      let fillRule = '';
-      if (s.holes.length) {
-        d += ' ' + s.holes.map((hp) => scalePathString(hp, pathScale)).join(' ');
-        fillRule = ' fill-rule="evenodd"';
-      }
+      const d = scalePathString(s.path, pathScale);
+      const fillRule = s.hasHoles ? ' fill-rule="evenodd"' : '';
       svg += `      <path fill="${s.hex}"${fillRule} stroke="${s.hex}" stroke-width="${strokeWidth}" stroke-linejoin="round" d="${d}"/>\n`;
     }
     svg += `    </g>\n`;
@@ -1026,14 +1153,15 @@ export function generateSvg(
     // This ensures large background shapes are drawn first, then smaller details on top
 
     // Collect ALL individual shapes with their colors and areas
-    const allShapesFlat: Array<{ hex: string; path: string; area: number }> = [];
+    const allShapesFlat: Array<{ hex: string; path: string; area: number; hasHoles?: boolean }> = [];
 
     for (const shape of shapes) {
       const hex = colorToHex(shape.color);
       allShapesFlat.push({
         hex,
         path: shape.path,
-        area: shape.area
+        area: shape.area,
+        hasHoles: shape.hasHoles
       });
     }
 
@@ -1041,14 +1169,18 @@ export function generateSvg(
     allShapesFlat.sort((a, b) => b.area - a.area);
 
     // Same-colour stroke to bridge the browser's anti-aliasing seam between
-    // abutting fills (the "white gaps"). Proportional to the viewBox (min side) so it
-    // stays a constant on-screen thickness whatever the trace resolution — the old
-    // `max(2.5, 3/pathScale)` was only ~0.7 device px on a 2048-viewBox AI trace.
-    const strokeWidthStd = Math.max(1.5, Math.min(width, height) * 0.004);
+    // abutting fills (the "white gaps"). Kept NARROW (~1px in viewBox units): a
+    // shape's stroke invades its neighbour's territory by half its width, and the
+    // old fat proportional stroke (0.004·min = ~8px at 2048) was painting over thin
+    // features wherever a later-drawn shape abutted them — outlines rendered as
+    // "bead chains". The tracer now emits an exact hole-aware tiling, so seams are
+    // hairline-only and a hairline bridge is all that's needed.
+    const strokeWidthStd = Math.max(1, Math.min(width, height) * 0.0006);
     svg += `    <g id="shapes-layer">\n`;
-    for (const { hex, path } of allShapesFlat) {
+    for (const { hex, path, hasHoles } of allShapesFlat) {
       const scaledPath = scalePathString(path, pathScale);
-      svg += `      <path fill="${hex}" stroke="${hex}" stroke-width="${strokeWidthStd}" stroke-linejoin="round" d="${scaledPath}"/>\n`;
+      const fillRule = hasHoles ? ' fill-rule="evenodd"' : '';
+      svg += `      <path fill="${hex}"${fillRule} stroke="${hex}" stroke-width="${strokeWidthStd}" stroke-linejoin="round" d="${scaledPath}"/>\n`;
     }
     svg += `    </g>\n`;
   }

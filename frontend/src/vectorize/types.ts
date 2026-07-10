@@ -16,10 +16,11 @@ export interface Point {
 }
 
 export interface ShapeData {
-  path: string;
+  path: string;          // outer contour + any enclosed-hole subpaths
   color: Color;
   area: number;
   isBackground: boolean;
+  hasHoles?: boolean;    // true → path has hole subpaths and needs fill-rule=evenodd
 }
 
 export type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';

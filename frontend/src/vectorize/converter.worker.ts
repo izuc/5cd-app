@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -86,14 +86,32 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
 
       // Gentle clean at native res — drop anti-alias speckles WITHOUT the heavy
       // majority/morphological erosion the old 'high' path used (which melted text).
+      // Passing the palette contrast-gates the majority filter so thin dark outlines
+      // survive while gradient/AA noise is still consolidated.
       postProgress(0.5, 'Cleaning...');
-      quantized = adaptiveClean(quantized, origWidth, origHeight, colorCount, Math.max(8, minArea), 'detailed');
+      quantized = adaptiveClean(quantized, origWidth, origHeight, colorCount, Math.max(8, minArea), 'detailed', newPalette);
 
       postProgress(0.55, 'Merging similar colors...');
       const mergeThreshold = qualityLevel === 'detailed' ? 4 : qualityLevel === 'high' ? 6 : 8;
       const merged = mergeSimilarColors(newPalette, quantized, mergeThreshold);
-      const finalPalette = merged.palette;
-      const nativeLabels = merged.quantized;
+
+      // Unify outline ink: near-black shades merge into the darkest palette entry so
+      // thin dark outlines are ONE label instead of an alternating mosaic that
+      // disintegrates into per-colour fragments when traced.
+      const inked = mergeInkColors(merged.palette, merged.quantized);
+      const finalPalette = inked.palette;
+
+      // De-mottle: gradient-heavy art (metallic/airbrushed logos) quantises into
+      // small islands of adjacent ramp shades. Absorb low-contrast islands into
+      // their dominant neighbour (size ceiling scales inversely with contrast), so
+      // smooth shading traces as clean flat bands instead of "camo" patches while
+      // small HIGH-contrast details (bolts, text, highlights) are untouched.
+      postProgress(0.57, 'Consolidating regions...');
+      // Floor: regions that would fall under the tracer's speckle floor (see
+      // traceMinArea below — same 5e-6 fraction, expressed at native res) are
+      // absorbed here instead of dropped there, so they can't leave gaps.
+      const nativeFloor = Math.max(4, Math.round(origWidth * origHeight * 5e-6) + 2);
+      const nativeLabels = consolidateRegions(inked.quantized, origWidth, origHeight, finalPalette, Math.max(8, minArea), nativeFloor);
 
       // Background / transparency masks (at native res).
       const foregroundMask: Uint8Array | null = removeBackground ? createForegroundMask(processedImgDataObj, 4) : null;
@@ -117,10 +135,11 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         if (finalMask) finalMask = upscaleMask(finalMask, origWidth, origHeight, scaleFactor);
         workingWidth = origWidth * scaleFactor;
         workingHeight = origHeight * scaleFactor;
-        // One majority pass on the upscaled labels rounds off the nearest-neighbour
-        // stair-steps and re-absorbs thin intermediate-shade slivers along edges, so
-        // boundaries trace as clean lines instead of patchy/wavy ones.
-        traceLabels = denoiseQuantized(traceLabels, workingWidth, workingHeight, 1);
+        // Two majority passes on the upscaled labels round off the nearest-neighbour
+        // stair-steps and re-absorb thin intermediate-shade slivers along edges, so
+        // boundaries trace as clean lines instead of patchy/wavy ones. Contrast-gated
+        // (via the palette) so it can't nibble thin high-contrast outlines.
+        traceLabels = denoiseQuantized(traceLabels, workingWidth, workingHeight, 2, finalPalette);
       }
 
       postProgress(0.6, 'Tracing shapes...');
