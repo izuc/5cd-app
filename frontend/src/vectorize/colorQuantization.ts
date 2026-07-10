@@ -748,6 +748,82 @@ export function consolidateRegions(
   return result;
 }
 
+// Potts-model label smoothing (ICM): relabel each pixel to minimise
+//   colourDistance(pixelRGB, palette[label]) + lambda * (# 8-neighbours that disagree)
+// Mottled gradient patches pay for their boundary length and collapse into their
+// surroundings; band boundaries settle along the TRUE image edges (data term), which
+// also straightens traced linework. Genuine edges resist flipping because the colour
+// distance outweighs the smoothness prior. Candidates per pixel = its own label plus
+// the distinct neighbour labels, so each pass is cheap. The transparent marker (255)
+// never flips either way.
+export function refineLabelsMRF(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  rgba: Uint8ClampedArray,
+  palette: Color[],
+  passes: number = 2,
+  lambda: number = 10
+): Uint8Array {
+  const result = new Uint8Array(labels);
+  const cand: number[] = [];
+
+  for (let pass = 0; pass < passes; pass++) {
+    let changed = 0;
+    for (let y = 0; y < height; y++) {
+      const y0 = y > 0 ? y - 1 : 0;
+      const y1 = y < height - 1 ? y + 1 : height - 1;
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        const cur = result[idx];
+        if (cur === 255) continue;
+
+        // Gather distinct neighbour labels (8-connected)
+        cand.length = 0;
+        cand.push(cur);
+        let heterogeneous = false;
+        const x0 = x > 0 ? x - 1 : 0;
+        const x1 = x < width - 1 ? x + 1 : width - 1;
+        for (let ny = y0; ny <= y1; ny++) {
+          const row = ny * width;
+          for (let nx = x0; nx <= x1; nx++) {
+            const l = result[row + nx];
+            if (l === cur || l === 255) continue;
+            heterogeneous = true;
+            if (!cand.includes(l)) cand.push(l);
+          }
+        }
+        // Interior pixels (all neighbours agree) can't improve — the common case.
+        if (!heterogeneous) continue;
+
+        const pr = rgba[idx * 4], pg = rgba[idx * 4 + 1], pb = rgba[idx * 4 + 2];
+        let bestLabel = cur;
+        let bestCost = Infinity;
+        for (const l of cand) {
+          const c = palette[l];
+          if (!c) continue;
+          const dr = pr - c.r, dg = pg - c.g, db = pb - c.b;
+          let disagree = 0;
+          for (let ny = y0; ny <= y1; ny++) {
+            const row = ny * width;
+            for (let nx = x0; nx <= x1; nx++) {
+              if (result[row + nx] !== l) disagree++;
+            }
+          }
+          // the centre pixel counted itself when its label != l; that offset is the
+          // same for every candidate except cur, and negligible for the argmin
+          const cost = Math.sqrt(dr * dr + dg * dg + db * db) + lambda * disagree;
+          if (cost < bestCost) { bestCost = cost; bestLabel = l; }
+        }
+        if (bestLabel !== cur) { result[idx] = bestLabel; changed++; }
+      }
+    }
+    if (changed === 0) break;
+  }
+
+  return result;
+}
+
 export function cleanSpeckles(
   quantized: Uint8Array,
   width: number,

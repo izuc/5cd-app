@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -83,6 +83,13 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
 
       postProgress(0.35, 'Mapping pixels...');
       let quantized = quantizeImage(processedImgDataObj, newPalette);
+
+      // Potts/ICM label refinement: collapses gradient "camo" mottle (patch
+      // boundaries cost length) and settles band boundaries along true image
+      // edges — smoother bands AND straighter linework. High-contrast features
+      // resist relabelling via the colour data term, so details are safe.
+      postProgress(0.45, 'Refining regions...');
+      quantized = refineLabelsMRF(quantized, origWidth, origHeight, processedData, newPalette, 3, 16);
 
       // Gentle clean at native res — drop anti-alias speckles WITHOUT the heavy
       // majority/morphological erosion the old 'high' path used (which melted text).
