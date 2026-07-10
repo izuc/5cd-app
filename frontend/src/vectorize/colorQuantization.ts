@@ -1507,6 +1507,73 @@ export function removeBackgroundLabels(
   return { removed: true, bgLabel, borderShare, outerPixels, pockets };
 }
 
+// Ridge reinforcement — reconnect "dotted" hairlines. A ~1px bright line (glint,
+// rim highlight) or dark line (cel outline, crease ink) only survives
+// quantisation where its core dominates a pixel; in between, the blend pixels
+// land on the SURROUNDING label and the line breaks into dashes. No label-map
+// merging can rejoin them — the evidence lives only in the raw image, where the
+// broken pixels are still a luminance RIDGE (brighter/darker than BOTH sides
+// across the line). Relabel such pixels to the nearest matching line label
+// (an anchor within the 5×5 window — a real dash end), which reconnects the
+// dashes into one region that the thin-link pass can then chain and trace as a
+// single continuous stroke.
+export function reinforceRidges(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  rgba: Uint8ClampedArray,
+  palette: Color[],
+  ridgeT: number = 34,   // must beat BOTH sides by this much
+  lumGap: number = 40    // label must disagree with the raw pixel by this much
+): { labels: Uint8Array; changed: number } {
+  const total = width * height;
+  const lum = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    lum[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+  }
+  const palLum = new Float32Array(256).fill(-1);
+  for (let l = 0; l < palette.length; l++) {
+    palLum[l] = 0.299 * palette[l].r + 0.587 * palette[l].g + 0.114 * palette[l].b;
+  }
+
+  const out = new Uint8Array(labels);
+  let changed = 0;
+  // Orientation offsets: across-line sample pairs at distance 2 (H, V, diagonals).
+  const offs = [2, 2 * width, 2 * width + 2, 2 * width - 2];
+  for (let y = 2; y < height - 2; y++) {
+    for (let x = 2; x < width - 2; x++) {
+      const i = y * width + x;
+      const l = labels[i];
+      if (l === 255) continue;
+      const L = lum[i];
+      const cur = palLum[l];
+      const wantBright = L - cur >= lumGap;  // labelled darker than it really is
+      const wantDark = cur - L >= lumGap;    // labelled brighter than it really is
+      if (!wantBright && !wantDark) continue;
+      // Ridge test: beat both sides across at least one orientation.
+      let ridge = false;
+      for (const o of offs) {
+        const a = lum[i - o], b = lum[i + o];
+        if (wantBright ? (L - Math.max(a, b) >= ridgeT) : (Math.min(a, b) - L >= ridgeT)) { ridge = true; break; }
+      }
+      if (!ridge) continue;
+      // Anchor: the most extreme matching label present nearby (a real dash end).
+      let best = -1, bestLum = wantBright ? cur + lumGap : cur - lumGap;
+      for (let dy = -2; dy <= 2; dy++) {
+        const row = (y + dy) * width;
+        for (let dx = -2; dx <= 2; dx++) {
+          const nl = labels[row + x + dx];
+          if (nl === 255 || nl === l) continue;
+          const pl = palLum[nl];
+          if (wantBright ? pl >= bestLum : pl <= bestLum) { bestLum = pl; best = nl; }
+        }
+      }
+      if (best >= 0) { out[i] = best; changed++; }
+    }
+  }
+  return { labels: out, changed };
+}
+
 // Gradient-driven band merging. Quantisation slices every smooth ramp (metallic
 // chrome, airbrushed shading) into bands of adjacent palette shades; the tracer
 // then emits one shape per band — the residual "patchiness". This pass merges

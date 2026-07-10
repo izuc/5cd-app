@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels, mergeGradientBands } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels, mergeGradientBands, reinforceRidges } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -161,10 +161,17 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         bgRemoved = removeBackgroundLabels(nativeLabels, origWidth, origHeight, processedData, finalPalette).removed;
       }
 
+      // Reconnect "dotted" hairlines: blend pixels where a ~1px bright/dark line
+      // lost its label are still luminance ridges in the raw image — relabel
+      // them back to the line so the thin-link pass below can chain the dashes
+      // into one continuous stroke.
+      postProgress(0.577, 'Reconnecting lines...');
+      const ridged = reinforceRidges(nativeLabels, origWidth, origHeight, processedData, finalPalette).labels;
+
       // Merge adjacent bands of one smooth ramp into single regions — they trace
       // as one shape with one fitted gradient instead of a patchwork of flat bands.
       postProgress(0.578, 'Merging gradient bands...');
-      const banded = mergeGradientBands(nativeLabels, origWidth, origHeight, processedData, finalPalette);
+      const banded = mergeGradientBands(ridged, origWidth, origHeight, processedData, finalPalette);
       // COVERAGE pass: any region still below the tracer's floor after
       // thin-linking never got chained, and the tracer would drop it — leaving
       // an uncovered hole in the plane tiling, visible as tiny white specks.
