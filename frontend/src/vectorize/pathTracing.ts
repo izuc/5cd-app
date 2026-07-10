@@ -1101,7 +1101,10 @@ function fitShapeGradient(
   dx /= dl; dy /= dl;
 
   const mx = g.sx / g.n, my = g.sy / g.n;
-  const K = 12;
+  // Finer profile resolution for large components: long ramps across big fields
+  // carry curvature that 12 bins under-sample; small shapes keep coarse bins so
+  // noisy means can't invent stops.
+  const K = g.n > 20000 ? 16 : 12;
 
   // Bin the samples along whatever 1-D parameterisation is in tBuf and return
   // the profile residual (within-bin variance) + stop-candidate points with t
