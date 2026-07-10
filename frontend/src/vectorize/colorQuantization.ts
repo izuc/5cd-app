@@ -733,11 +733,13 @@ export function consolidateRegions(
       }
       if (bestColor >= 0 && bestColor < palette.length && color < palette.length) {
         const d = colorDistance(palette[color], palette[bestColor]);
-        // Regions below floorArea merge UNCONDITIONALLY (any contrast): the tracer
-        // would drop them anyway, but dropping leaves a hole in the drawing while
-        // absorbing keeps lines/areas continuous (a mid-line fragment joins the
-        // adjacent shade instead of becoming a white gap).
-        if (area <= absorbLimit(d) || area < floorArea) {
+        // Regions below floorArea merge regardless of the ladder — EXCEPT
+        // high-contrast ones (d ≥ 120): those are fragments of visually
+        // load-bearing detail (hairline glint dashes, ink dots) that the
+        // thin-link pass downstream can chain back into continuous strokes.
+        // Absorbing them recoloured hairlines into their surroundings — the
+        // "dashed highlights" artefact. True dust (< 4 px) still always merges.
+        if (area <= absorbLimit(d) || (area < floorArea && (d < 120 || area < 4))) {
           for (const rIdx of regionIndices) result[rIdx] = bestColor;
         }
       }
@@ -1555,6 +1557,8 @@ export function mergeGradientBands(
   const rscy = [new Float64Array(compCount), new Float64Array(compCount), new Float64Array(compCount)];
   const rscc = [new Float64Array(compCount), new Float64Array(compCount), new Float64Array(compCount)];
   const rLabel = new Int32Array(compCount).fill(-1);
+  const rx0 = new Int32Array(compCount).fill(0x7fffffff), ry0 = new Int32Array(compCount).fill(0x7fffffff);
+  const rx1 = new Int32Array(compCount).fill(-1), ry1 = new Int32Array(compCount).fill(-1);
   for (let i = 0; i < total; i++) {
     const id = comp[i];
     if (id < 0) continue;
@@ -1562,6 +1566,8 @@ export function mergeGradientBands(
     const x = i % width, y = (i / width) | 0;
     rn[id]++;
     rsx[id] += x; rsy[id] += y; rsxx[id] += x * x; rsyy[id] += y * y; rsxy[id] += x * y;
+    if (x < rx0[id]) rx0[id] = x; if (x > rx1[id]) rx1[id] = x;
+    if (y < ry0[id]) ry0[id] = y; if (y > ry1[id]) ry1[id] = y;
     for (let ch = 0; ch < 3; ch++) {
       const v = rgba[i * 4 + ch];
       rsc[ch][id] += v; rscx[ch][id] += v * x; rscy[ch][id] += v * y; rscc[ch][id] += v * v;
@@ -1628,10 +1634,38 @@ export function mergeGradientBands(
   }
   cands.sort((p, q) => p.d - q.d);
 
+  // Thin-stroke test: a hairline (glint, rim highlight, fine outline) has a long
+  // bbox but tiny area — average width = area / bbox-extent. Quantisation breaks
+  // such strokes into a MOSAIC of adjacent light shades whose fragments then
+  // trace as dashes; two thin neighbours of similar shade are one stroke.
+  const isThin = (r: number): boolean => {
+    const ext = Math.max(rx1[r] - rx0[r] + 1, ry1[r] - ry0[r] + 1);
+    return ext >= 8 && rn[r] / ext <= 4;
+  };
+
   let merges = 0;
-  for (const { a, b } of cands) {
+  for (const { a, b, d } of cands) {
     const ra = find(a), rb = find(b);
     if (ra === rb) continue;
+    // Thin-link: chain hairline fragments without plane-fit gates (a hairline's
+    // spatial spread is degenerate, so the plane path can never merge them).
+    if (d <= 60 && isThin(ra) && isThin(rb)) {
+      const [keep2, drop2] = rn[ra] >= rn[rb] ? [ra, rb] : [rb, ra];
+      parent[drop2] = keep2;
+      rn[keep2] += rn[drop2];
+      rsx[keep2] += rsx[drop2]; rsy[keep2] += rsy[drop2];
+      rsxx[keep2] += rsxx[drop2]; rsyy[keep2] += rsyy[drop2]; rsxy[keep2] += rsxy[drop2];
+      for (let ch = 0; ch < 3; ch++) {
+        rsc[ch][keep2] += rsc[ch][drop2]; rscx[ch][keep2] += rscx[ch][drop2];
+        rscy[ch][keep2] += rscy[ch][drop2]; rscc[ch][keep2] += rscc[ch][drop2];
+      }
+      if (rx0[drop2] < rx0[keep2]) rx0[keep2] = rx0[drop2];
+      if (ry0[drop2] < ry0[keep2]) ry0[keep2] = ry0[drop2];
+      if (rx1[drop2] > rx1[keep2]) rx1[keep2] = rx1[drop2];
+      if (ry1[drop2] > ry1[keep2]) ry1[keep2] = ry1[drop2];
+      merges++;
+      continue;
+    }
     const sA = fitStats(rn[ra], rsx[ra], rsy[ra], rsxx[ra], rsyy[ra], rsxy[ra],
       [rsc[0][ra], rsc[1][ra], rsc[2][ra]], [rscx[0][ra], rscx[1][ra], rscx[2][ra]], [rscy[0][ra], rscy[1][ra], rscy[2][ra]], [rscc[0][ra], rscc[1][ra], rscc[2][ra]]);
     const sB = fitStats(rn[rb], rsx[rb], rsy[rb], rsxx[rb], rsyy[rb], rsxy[rb],
@@ -1660,6 +1694,10 @@ export function mergeGradientBands(
       rsc[ch][keep] += rsc[ch][drop]; rscx[ch][keep] += rscx[ch][drop];
       rscy[ch][keep] += rscy[ch][drop]; rscc[ch][keep] += rscc[ch][drop];
     }
+    if (rx0[drop] < rx0[keep]) rx0[keep] = rx0[drop];
+    if (ry0[drop] < ry0[keep]) ry0[keep] = ry0[drop];
+    if (rx1[drop] > rx1[keep]) rx1[keep] = rx1[drop];
+    if (ry1[drop] > ry1[keep]) ry1[keep] = ry1[drop];
     merges++;
   }
   if (merges === 0) return { labels, merges: 0 };
