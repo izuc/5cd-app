@@ -1500,6 +1500,178 @@ export function removeBackgroundLabels(
   return { removed: true, bgLabel, borderShare, outerPixels, pockets };
 }
 
+// Gradient-driven band merging. Quantisation slices every smooth ramp (metallic
+// chrome, airbrushed shading) into bands of adjacent palette shades; the tracer
+// then emits one shape per band — the residual "patchiness". This pass merges
+// adjacent regions that a SINGLE linear colour plane c(x,y)=a+bx+cy explains as
+// well as it explains them separately: the least-squares sums of a plane fit are
+// ADDITIVE over disjoint regions, so testing a union costs O(1) once per-region
+// sums exist. A hard edge between two similar colours keeps the union residual
+// high (the plane can't model a step), so real boundaries survive — the test is
+// edge-preserving by construction. Merged bands trace as ONE shape whose fitted
+// linearGradient covers the whole ramp: smoother colour, fewer seams, smaller SVG.
+export function mergeGradientBands(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  rgba: Uint8ClampedArray,
+  palette: Color[],
+  colorTol: number = 80,   // only bands of similar shades are candidates
+  rmsCap: number = 13,     // union plane residual must stay this tight (per channel)
+  rmsSlack: number = 3.5   // …and not much worse than the parts fitted separately
+): { labels: Uint8Array; merges: number } {
+  const total = width * height;
+
+  // 1. Connected components (4-connectivity is enough for banding) + region sums.
+  const comp = new Int32Array(total).fill(-1);
+  let compCount = 0;
+  {
+    const stack: number[] = [];
+    for (let seed = 0; seed < total; seed++) {
+      if (comp[seed] !== -1 || labels[seed] === 255) continue;
+      const l = labels[seed];
+      const id = compCount++;
+      comp[seed] = id;
+      stack.push(seed);
+      while (stack.length > 0) {
+        const i = stack.pop()!;
+        const x = i % width, y = (i / width) | 0;
+        if (x > 0 && comp[i - 1] === -1 && labels[i - 1] === l) { comp[i - 1] = id; stack.push(i - 1); }
+        if (x < width - 1 && comp[i + 1] === -1 && labels[i + 1] === l) { comp[i + 1] = id; stack.push(i + 1); }
+        if (y > 0 && comp[i - width] === -1 && labels[i - width] === l) { comp[i - width] = id; stack.push(i - width); }
+        if (y < height - 1 && comp[i + width] === -1 && labels[i + width] === l) { comp[i + width] = id; stack.push(i + width); }
+      }
+    }
+  }
+  // Pair keys pack two component ids into one number (a·2²⁰ + b).
+  if (compCount < 2 || compCount >= 0x100000) return { labels, merges: 0 };
+
+  // Per-region plane-fit sums (see fitLinearGradient in pathTracing for the model).
+  const rn = new Float64Array(compCount);
+  const rsx = new Float64Array(compCount), rsy = new Float64Array(compCount);
+  const rsxx = new Float64Array(compCount), rsyy = new Float64Array(compCount), rsxy = new Float64Array(compCount);
+  const rsc = [new Float64Array(compCount), new Float64Array(compCount), new Float64Array(compCount)];
+  const rscx = [new Float64Array(compCount), new Float64Array(compCount), new Float64Array(compCount)];
+  const rscy = [new Float64Array(compCount), new Float64Array(compCount), new Float64Array(compCount)];
+  const rscc = [new Float64Array(compCount), new Float64Array(compCount), new Float64Array(compCount)];
+  const rLabel = new Int32Array(compCount).fill(-1);
+  for (let i = 0; i < total; i++) {
+    const id = comp[i];
+    if (id < 0) continue;
+    if (rLabel[id] < 0) rLabel[id] = labels[i];
+    const x = i % width, y = (i / width) | 0;
+    rn[id]++;
+    rsx[id] += x; rsy[id] += y; rsxx[id] += x * x; rsyy[id] += y * y; rsxy[id] += x * y;
+    for (let ch = 0; ch < 3; ch++) {
+      const v = rgba[i * 4 + ch];
+      rsc[ch][id] += v; rscx[ch][id] += v * x; rscy[ch][id] += v * y; rscc[ch][id] += v * v;
+    }
+  }
+
+  // Plane fit from sums: per-channel-averaged residual RMS plus the flat/plane
+  // SSEs (the trace-time gradient gate needs the ratio). Degenerate spatial
+  // spread falls back to the flat-fill statistics.
+  const fitStats = (n: number, sx: number, sy: number, sxx: number, syy: number, sxy: number,
+    sc: number[], scx: number[], scy: number[], scc: number[]): { rms: number; sseFlat: number; ssePlane: number } => {
+    const det = n * (sxx * syy - sxy * sxy) - sx * (sx * syy - sxy * sy) + sy * (sx * sxy - sxx * sy);
+    let sseFlat = 0;
+    for (let ch = 0; ch < 3; ch++) sseFlat += Math.max(0, scc[ch] - (sc[ch] * sc[ch]) / n);
+    let ssePlane = sseFlat;
+    if (Math.abs(det) > 1e-3 * n) {
+      const i00 = (sxx * syy - sxy * sxy) / det;
+      const i01 = (sy * sxy - sx * syy) / det;
+      const i02 = (sx * sxy - sy * sxx) / det;
+      const i11 = (n * syy - sy * sy) / det;
+      const i12 = (sx * sy - n * sxy) / det;
+      const i22 = (n * sxx - sx * sx) / det;
+      ssePlane = 0;
+      for (let ch = 0; ch < 3; ch++) {
+        const a = i00 * sc[ch] + i01 * scx[ch] + i02 * scy[ch];
+        const b = i01 * sc[ch] + i11 * scx[ch] + i12 * scy[ch];
+        const c = i02 * sc[ch] + i12 * scx[ch] + i22 * scy[ch];
+        ssePlane += Math.max(0, scc[ch] - (a * sc[ch] + b * scx[ch] + c * scy[ch]));
+      }
+    }
+    return { rms: Math.sqrt(ssePlane / (3 * n)), sseFlat, ssePlane };
+  };
+
+  // 2. Adjacency pairs with shared-boundary length.
+  const pairCount = new Map<number, number>();
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      const a = comp[i];
+      if (a < 0) continue;
+      if (x < width - 1) {
+        const b = comp[i + 1];
+        if (b >= 0 && b !== a) { const k = a < b ? a * 0x100000 + b : b * 0x100000 + a; pairCount.set(k, (pairCount.get(k) || 0) + 1); }
+      }
+      if (y < height - 1) {
+        const b = comp[i + width];
+        if (b >= 0 && b !== a) { const k = a < b ? a * 0x100000 + b : b * 0x100000 + a; pairCount.set(k, (pairCount.get(k) || 0) + 1); }
+      }
+    }
+  }
+
+  // 3. Greedy union-find over candidate pairs, closest shades first.
+  const parent = new Int32Array(compCount);
+  for (let i = 0; i < compCount; i++) parent[i] = i;
+  const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+
+  type Cand = { a: number; b: number; d: number };
+  const cands: Cand[] = [];
+  for (const [k, cnt] of pairCount) {
+    if (cnt < 4) continue; // touching at a corner sliver — not a band boundary
+    const a = Math.floor(k / 0x100000), b = k % 0x100000;
+    const d = colorDistance(palette[rLabel[a]], palette[rLabel[b]]);
+    if (d <= colorTol) cands.push({ a, b, d });
+  }
+  cands.sort((p, q) => p.d - q.d);
+
+  let merges = 0;
+  for (const { a, b } of cands) {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) continue;
+    const sA = fitStats(rn[ra], rsx[ra], rsy[ra], rsxx[ra], rsyy[ra], rsxy[ra],
+      [rsc[0][ra], rsc[1][ra], rsc[2][ra]], [rscx[0][ra], rscx[1][ra], rscx[2][ra]], [rscy[0][ra], rscy[1][ra], rscy[2][ra]], [rscc[0][ra], rscc[1][ra], rscc[2][ra]]);
+    const sB = fitStats(rn[rb], rsx[rb], rsy[rb], rsxx[rb], rsyy[rb], rsxy[rb],
+      [rsc[0][rb], rsc[1][rb], rsc[2][rb]], [rscx[0][rb], rscx[1][rb], rscx[2][rb]], [rscy[0][rb], rscy[1][rb], rscy[2][rb]], [rscc[0][rb], rscc[1][rb], rscc[2][rb]]);
+    const nU = rn[ra] + rn[rb];
+    const sU = fitStats(nU, rsx[ra] + rsx[rb], rsy[ra] + rsy[rb], rsxx[ra] + rsxx[rb], rsyy[ra] + rsyy[rb], rsxy[ra] + rsxy[rb],
+      [rsc[0][ra] + rsc[0][rb], rsc[1][ra] + rsc[1][rb], rsc[2][ra] + rsc[2][rb]],
+      [rscx[0][ra] + rscx[0][rb], rscx[1][ra] + rscx[1][rb], rscx[2][ra] + rscx[2][rb]],
+      [rscy[0][ra] + rscy[0][rb], rscy[1][ra] + rscy[1][rb], rscy[2][ra] + rscy[2][rb]],
+      [rscc[0][ra] + rscc[0][rb], rscc[1][ra] + rscc[1][rb], rscc[2][ra] + rscc[2][rb]]);
+    // Merge only when (a) the union plane is tight, (b) not much worse than the
+    // parts fitted separately, and (c) the union will actually PASS the tracer's
+    // gradient gate (n and SSE-reduction mirror fitLinearGradient) — a merged
+    // region that ends up flat-filled would paint the absorbed bands the wrong
+    // colour, which is worse than leaving the bands alone.
+    if (!(sU.rms <= rmsCap && sU.rms <= Math.max(sA.rms, sB.rms) + rmsSlack
+      && nU >= 300 && sU.ssePlane <= 0.6 * sU.sseFlat)) continue;
+
+    // Union: bigger side keeps the root (and its dominant label); sums add.
+    const [keep, drop] = rn[ra] >= rn[rb] ? [ra, rb] : [rb, ra];
+    parent[drop] = keep;
+    rn[keep] += rn[drop];
+    rsx[keep] += rsx[drop]; rsy[keep] += rsy[drop];
+    rsxx[keep] += rsxx[drop]; rsyy[keep] += rsyy[drop]; rsxy[keep] += rsxy[drop];
+    for (let ch = 0; ch < 3; ch++) {
+      rsc[ch][keep] += rsc[ch][drop]; rscx[ch][keep] += rscx[ch][drop];
+      rscy[ch][keep] += rscy[ch][drop]; rscc[ch][keep] += rscc[ch][drop];
+    }
+    merges++;
+  }
+  if (merges === 0) return { labels, merges: 0 };
+
+  // 4. Relabel every pixel to its root's dominant label.
+  const out = new Uint8Array(labels);
+  for (let i = 0; i < total; i++) {
+    if (comp[i] >= 0) out[i] = rLabel[find(comp[i])];
+  }
+  return { labels: out, merges };
+}
+
 // Recompute each palette entry as the mean of the pixels ACTUALLY assigned to it.
 // The palette was estimated from a sparse sample before cleanup; after merging /
 // consolidation the label contents have shifted, and the true per-label mean is a

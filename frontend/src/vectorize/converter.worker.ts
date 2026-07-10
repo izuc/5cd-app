@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels, mergeGradientBands } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -161,8 +161,16 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         bgRemoved = removeBackgroundLabels(nativeLabels, origWidth, origHeight, processedData, finalPalette).removed;
       }
 
-      // Truer fills: recompute each palette entry as the mean of its actual pixels
-      // now that merging/consolidation has settled the label map.
+      // Merge adjacent bands of one smooth ramp into single regions — they trace
+      // as one shape with one fitted gradient instead of a patchwork of flat bands.
+      postProgress(0.578, 'Merging gradient bands...');
+      const banded = mergeGradientBands(nativeLabels, origWidth, origHeight, processedData, finalPalette);
+      const mergedLabels = banded.labels;
+
+      // Truer fills: recompute each palette entry as the mean of its actual pixels.
+      // Uses the PRE-merge labels: band merging pools multi-shade pixels under one
+      // label, which would pollute that label's flat colour for the small
+      // components elsewhere that still rely on it (merged unions take gradients).
       const displayPalette = refreshPaletteFromLabels(nativeLabels, processedData, finalPalette, origWidth, origHeight);
 
       // Legacy silhouette mask only as a FALLBACK when no confident border-dominant
@@ -182,10 +190,10 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       const scaleFactor = qualityLevel === 'detailed' ? 4 : qualityLevel === 'high' ? 3 : qualityLevel === 'balanced' ? 2 : 1;
       let workingWidth = origWidth;
       let workingHeight = origHeight;
-      let traceLabels = nativeLabels;
+      let traceLabels = mergedLabels;
       if (scaleFactor > 1) {
         postProgress(0.58, 'Upscaling for smooth curves...');
-        traceLabels = upscaleLabelsBilinear(nativeLabels, origWidth, origHeight, scaleFactor);
+        traceLabels = upscaleLabelsBilinear(mergedLabels, origWidth, origHeight, scaleFactor);
         if (finalMask) finalMask = upscaleMask(finalMask, origWidth, origHeight, scaleFactor);
         workingWidth = origWidth * scaleFactor;
         workingHeight = origHeight * scaleFactor;
