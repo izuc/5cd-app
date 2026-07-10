@@ -748,6 +748,40 @@ export function consolidateRegions(
   return result;
 }
 
+// Per-pixel smoothness weight for the MRF below: STRONG deep inside flat/gradient
+// areas (that's where mottle patches live — merge them hard) and WEAK near strong
+// image gradients (real edges — let the data term place the boundary precisely).
+// A single global lambda can't do both: high enough to kill patches starts eating
+// mid-contrast detail at edges.
+export function computeLambdaMap(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  lambdaEdge: number = 6,
+  lambdaFlat: number = 26,
+  gLo: number = 8,
+  gHi: number = 40
+): Float32Array {
+  const map = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const ym = y > 0 ? y - 1 : 0;
+    const yp = y < height - 1 ? y + 1 : height - 1;
+    for (let x = 0; x < width; x++) {
+      const xm = x > 0 ? x - 1 : 0;
+      const xp = x < width - 1 ? x + 1 : width - 1;
+      const iL = (y * width + xm) * 4, iR = (y * width + xp) * 4;
+      const iU = (ym * width + x) * 4, iD = (yp * width + x) * 4;
+      // channel-max central-difference gradient magnitude (cheap, catches hue edges)
+      const gx = Math.max(Math.abs(rgba[iR] - rgba[iL]), Math.abs(rgba[iR + 1] - rgba[iL + 1]), Math.abs(rgba[iR + 2] - rgba[iL + 2]));
+      const gy = Math.max(Math.abs(rgba[iD] - rgba[iU]), Math.abs(rgba[iD + 1] - rgba[iU + 1]), Math.abs(rgba[iD + 2] - rgba[iU + 2]));
+      const g = Math.max(gx, gy);
+      const t = g <= gLo ? 1 : g >= gHi ? 0 : (gHi - g) / (gHi - gLo);
+      map[y * width + x] = lambdaEdge + (lambdaFlat - lambdaEdge) * t;
+    }
+  }
+  return map;
+}
+
 // Potts-model label smoothing (ICM): relabel each pixel to minimise
 //   colourDistance(pixelRGB, palette[label]) + lambda * (# 8-neighbours that disagree)
 // Mottled gradient patches pay for their boundary length and collapse into their
@@ -755,7 +789,8 @@ export function consolidateRegions(
 // also straightens traced linework. Genuine edges resist flipping because the colour
 // distance outweighs the smoothness prior. Candidates per pixel = its own label plus
 // the distinct neighbour labels, so each pass is cheap. The transparent marker (255)
-// never flips either way.
+// never flips either way. `lambdaMap` (per-pixel, see computeLambdaMap) overrides the
+// scalar lambda when provided.
 export function refineLabelsMRF(
   labels: Uint8Array,
   width: number,
@@ -763,7 +798,8 @@ export function refineLabelsMRF(
   rgba: Uint8ClampedArray,
   palette: Color[],
   passes: number = 2,
-  lambda: number = 10
+  lambda: number = 10,
+  lambdaMap?: Float32Array
 ): Uint8Array {
   const result = new Uint8Array(labels);
   const cand: number[] = [];
@@ -797,6 +833,7 @@ export function refineLabelsMRF(
         if (!heterogeneous) continue;
 
         const pr = rgba[idx * 4], pg = rgba[idx * 4 + 1], pb = rgba[idx * 4 + 2];
+        const lam = lambdaMap ? lambdaMap[idx] : lambda;
         let bestLabel = cur;
         let bestCost = Infinity;
         for (const l of cand) {
@@ -812,7 +849,7 @@ export function refineLabelsMRF(
           }
           // the centre pixel counted itself when its label != l; that offset is the
           // same for every candidate except cur, and negligible for the argmin
-          const cost = Math.sqrt(dr * dr + dg * dg + db * db) + lambda * disagree;
+          const cost = Math.sqrt(dr * dr + dg * dg + db * db) + lam * disagree;
           if (cost < bestCost) { bestCost = cost; bestLabel = l; }
         }
         if (bestLabel !== cur) { result[idx] = bestLabel; changed++; }
