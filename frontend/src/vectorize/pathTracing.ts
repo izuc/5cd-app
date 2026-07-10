@@ -1239,6 +1239,57 @@ function fitShapeGradient(
   };
 }
 
+// Geometric shape recognition. Rasterised circles (bolts, rivets, dots, wheels)
+// and axis-aligned rectangles (windows, bars, tiles, counters) come out of the
+// generic curve fitter as slightly wobbly bezier blobs; when a component's
+// boundary IS one of these primitives, emitting the exact geometry is strictly
+// crisper. Gates are strict so organic blobs can never false-positive:
+// - rectangle: the component (plus its enclosed holes) fills ≥98.5% of its
+//   bounding box — for a connected region that is only true of a rectangle;
+// - circle: boundary radius about the centroid is near-constant AND the area
+//   matches πr² — the area check rejects rings/stars whose boundary alone
+//   could masquerade.
+// `area` must include enclosed-hole area so frames and donuts snap too.
+function snapPrimitivePath(
+  boundary: Point[],
+  area: number,
+  bx0: number, by0: number, bx1: number, by1: number
+): string | null {
+  if (boundary.length < 8 || area < 16) return null;
+  const f = (v: number) => Math.round(v * 10) / 10;
+
+  // Rectangle. Small shapes get a tolerant fill gate (their misses are ragged
+  // anti-aliased edge pixels); large shapes stay strict — a loose gate on a
+  // 200×100 region could hide a ~26px corner radius, and squaring off a
+  // visibly rounded rectangle is worse than curve-fitting it.
+  const w = bx1 - bx0 + 1, h = by1 - by0 + 1;
+  if (w >= 3 && h >= 3 && area >= w * h * (w * h <= 4000 ? 0.97 : 0.985)) {
+    return `M ${bx0} ${by0} L ${bx1} ${by0} L ${bx1} ${by1} L ${bx0} ${by1} Z`;
+  }
+
+  // Circle
+  let cx = 0, cy = 0;
+  for (const p of boundary) { cx += p.x; cy += p.y; }
+  cx /= boundary.length; cy /= boundary.length;
+  let rsum = 0;
+  for (const p of boundary) rsum += Math.hypot(p.x - cx, p.y - cy);
+  const r = rsum / boundary.length;
+  if (r < 2.5) return null;
+  let maxDev = 0;
+  for (const p of boundary) {
+    const d = Math.abs(Math.hypot(p.x - cx, p.y - cy) - r);
+    if (d > maxDev) maxDev = d;
+  }
+  if (maxDev > Math.max(0.08 * r, 1.5)) return null;
+  if (Math.abs(area - Math.PI * r * r) > 0.12 * Math.PI * r * r) return null;
+  const k = 0.5522847498 * r;
+  return `M ${f(cx - r)} ${f(cy)}` +
+    ` C ${f(cx - r)} ${f(cy - k)} ${f(cx - k)} ${f(cy - r)} ${f(cx)} ${f(cy - r)}` +
+    ` C ${f(cx + k)} ${f(cy - r)} ${f(cx + r)} ${f(cy - k)} ${f(cx + r)} ${f(cy)}` +
+    ` C ${f(cx + r)} ${f(cy + k)} ${f(cx + k)} ${f(cy + r)} ${f(cx)} ${f(cy + r)}` +
+    ` C ${f(cx - k)} ${f(cy + r)} ${f(cx - r)} ${f(cy + k)} ${f(cx - r)} ${f(cy)} Z`;
+}
+
 export function traceAllColors(
   quantized: Uint8Array,
   width: number,
@@ -1487,8 +1538,19 @@ export function traceAllColors(
 
           const useFit = qualityLevel !== 'fast';
 
+          // Geometric snap first — for a true circle/rectangle the exact
+          // primitive beats any fitted curve. Enclosed holes count toward the
+          // fill area so frames and donuts qualify on their outer boundary.
+          let holeArea = 0;
+          for (const h of holes) holeArea += h.size;
+          const snapped = useFit
+            ? snapPrimitivePath(boundary, pixelCount + holeArea, cbx0, cby0, cbx1, cby1)
+            : null;
+
           let pathStr: string;
-          if (useFit) {
+          if (snapped) {
+            pathStr = snapped;
+          } else if (useFit) {
             // Least-squares cubic fitting across corner-to-corner runs (see
             // contourToPath) — smooths boundary noise the polyline pipeline keeps.
             pathStr = contourToPath(boundary, smoothness, qualityLevel, simplifyScale, regionThickness);
@@ -1506,7 +1568,13 @@ export function traceAllColors(
             const holeThickness = (2 * h.size) / h.boundary.length;
             let hPath: string;
             if (useFit) {
-              hPath = contourToPath(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
+              let hx0 = width, hy0 = height, hx1 = -1, hy1 = -1;
+              for (const p of h.boundary) {
+                if (p.x < hx0) hx0 = p.x; if (p.x > hx1) hx1 = p.x;
+                if (p.y < hy0) hy0 = p.y; if (p.y > hy1) hy1 = p.y;
+              }
+              hPath = snapPrimitivePath(h.boundary, h.size, hx0, hy0, hx1, hy1)
+                || contourToPath(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
             } else {
               const hRefined = refinePathMultiStage(h.boundary, smoothness, qualityLevel, simplifyScale, holeThickness);
               if (hRefined.length < 3) continue;
