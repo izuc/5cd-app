@@ -1601,8 +1601,30 @@ export function mergeGradientBands(
     return { rms: Math.sqrt(ssePlane / (3 * n)), sseFlat, ssePlane };
   };
 
-  // 2. Adjacency pairs with shared-boundary length.
+  // 2. Adjacency pairs with shared-boundary length AND how much of that boundary
+  // is "smooth" (no real image gradient at the contact). A quantisation cut
+  // through a smooth or textured area has no edge in the source; a drawn
+  // boundary does — that distinction powers the texture-pooling rule below.
+  const gradAt = (i: number): number => {
+    const x = i % width, y = (i / width) | 0;
+    const xl = (y * width + (x > 0 ? x - 1 : x)) * 4, xr = (y * width + (x < width - 1 ? x + 1 : x)) * 4;
+    const yu = ((y > 0 ? y - 1 : y) * width + x) * 4, yd = ((y < height - 1 ? y + 1 : y) * width + x) * 4;
+    let g = 0;
+    for (let c = 0; c < 3; c++) {
+      const gx = Math.abs(rgba[xr + c] - rgba[xl + c]);
+      const gy = Math.abs(rgba[yd + c] - rgba[yu + c]);
+      if (gx > g) g = gx;
+      if (gy > g) g = gy;
+    }
+    return g;
+  };
   const pairCount = new Map<number, number>();
+  const pairSmooth = new Map<number, number>();
+  const touchPair = (a: number, b: number, i: number, j: number) => {
+    const k = a < b ? a * 0x100000 + b : b * 0x100000 + a;
+    pairCount.set(k, (pairCount.get(k) || 0) + 1);
+    if (Math.max(gradAt(i), gradAt(j)) < 25) pairSmooth.set(k, (pairSmooth.get(k) || 0) + 1);
+  };
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
@@ -1610,11 +1632,11 @@ export function mergeGradientBands(
       if (a < 0) continue;
       if (x < width - 1) {
         const b = comp[i + 1];
-        if (b >= 0 && b !== a) { const k = a < b ? a * 0x100000 + b : b * 0x100000 + a; pairCount.set(k, (pairCount.get(k) || 0) + 1); }
+        if (b >= 0 && b !== a) touchPair(a, b, i, i + 1);
       }
       if (y < height - 1) {
         const b = comp[i + width];
-        if (b >= 0 && b !== a) { const k = a < b ? a * 0x100000 + b : b * 0x100000 + a; pairCount.set(k, (pairCount.get(k) || 0) + 1); }
+        if (b >= 0 && b !== a) touchPair(a, b, i, i + width);
       }
     }
   }
@@ -1624,13 +1646,13 @@ export function mergeGradientBands(
   for (let i = 0; i < compCount; i++) parent[i] = i;
   const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
 
-  type Cand = { a: number; b: number; d: number };
+  type Cand = { a: number; b: number; d: number; smoothFrac: number };
   const cands: Cand[] = [];
   for (const [k, cnt] of pairCount) {
     if (cnt < 4) continue; // touching at a corner sliver — not a band boundary
     const a = Math.floor(k / 0x100000), b = k % 0x100000;
     const d = colorDistance(palette[rLabel[a]], palette[rLabel[b]]);
-    if (d <= colorTol) cands.push({ a, b, d });
+    if (d <= colorTol) cands.push({ a, b, d, smoothFrac: (pairSmooth.get(k) || 0) / cnt });
   }
   cands.sort((p, q) => p.d - q.d);
 
@@ -1643,13 +1665,38 @@ export function mergeGradientBands(
     return ext >= 8 && rn[r] / ext <= 4;
   };
 
+  const rootMean = (r: number): Color => ({ r: rsc[0][r] / rn[r], g: rsc[1][r] / rn[r], b: rsc[2][r] / rn[r], a: 255 });
+
   let merges = 0;
-  for (const { a, b, d } of cands) {
+  for (const { a, b, d, smoothFrac } of cands) {
     const ra = find(a), rb = find(b);
     if (ra === rb) continue;
+    // Texture pooling: a boundary between two CLOSE shades with no real image
+    // edge along it (≥75% smooth contact) is a quantisation artefact — brushed
+    // texture or soft shading arbitrarily split into blobs. Pool them without
+    // model fits: neither a plane nor a 1-D profile explains texture, which is
+    // exactly why these blobs survived every other merge rule. Real drawn
+    // boundaries carry gradient at the contact and are never pooled. Guards:
+    // the CURRENT union means must still be close (chained pools drift across
+    // soft photo fields — A≈B≈C but A≠C — which flattened photos measurably)
+    // and the union's plane residual must stay bounded so a flat-fill fallback
+    // can never lose much.
+    // Blob-into-field only (smaller side bounded): fusing two LARGE soft fields
+    // is where photos lose fidelity — a big pooled union renders flatter than
+    // the two fields it replaced. Texture blobs are small-to-mid by nature.
+    let texturePool = false;
+    if (d <= 35 && smoothFrac >= 0.75 && Math.min(rn[ra], rn[rb]) <= 2500
+      && colorDistance(rootMean(ra), rootMean(rb)) <= 35) {
+      const sPool = fitStats(rn[ra] + rn[rb], rsx[ra] + rsx[rb], rsy[ra] + rsy[rb], rsxx[ra] + rsxx[rb], rsyy[ra] + rsyy[rb], rsxy[ra] + rsxy[rb],
+        [rsc[0][ra] + rsc[0][rb], rsc[1][ra] + rsc[1][rb], rsc[2][ra] + rsc[2][rb]],
+        [rscx[0][ra] + rscx[0][rb], rscx[1][ra] + rscx[1][rb], rscx[2][ra] + rscx[2][rb]],
+        [rscy[0][ra] + rscy[0][rb], rscy[1][ra] + rscy[1][rb], rscy[2][ra] + rscy[2][rb]],
+        [rscc[0][ra] + rscc[0][rb], rscc[1][ra] + rscc[1][rb], rscc[2][ra] + rscc[2][rb]]);
+      texturePool = sPool.rms <= 16;
+    }
     // Thin-link: chain hairline fragments without plane-fit gates (a hairline's
     // spatial spread is degenerate, so the plane path can never merge them).
-    if (d <= 60 && isThin(ra) && isThin(rb)) {
+    if (texturePool || (d <= 60 && isThin(ra) && isThin(rb))) {
       const [keep2, drop2] = rn[ra] >= rn[rb] ? [ra, rb] : [rb, ra];
       parent[drop2] = keep2;
       rn[keep2] += rn[drop2];
