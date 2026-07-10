@@ -1308,29 +1308,245 @@ export function createForegroundMask(
   return dilatedMask;
 }
 
+// Smart background removal on the LABEL MAP (not the SVG): detect the border-
+// dominant label, flood it from the border (the outer background), then decide each
+// ENCLOSED island of the same label — a white pocket trapped inside linework vs
+// genuine white content (chrome highlights, glints) — by comparing its RAW-pixel
+// statistics against the outer background's. Pockets ARE the background showing
+// through, so their mean matches the background's and their variance is just as
+// flat; content that merely quantised into the background's palette entry is part
+// of a shading ramp — its mean drifts and its spread is far higher. This is the
+// signal an SVG-level "delete the white shapes" pass fundamentally lacks (there,
+// pocket and highlight are the same hex).
+// Removed pixels become the 255 transparent marker (mutated in place), which the
+// whole downstream pipeline already understands: denoiseQuantized never flips
+// across 255, traceAllColors gives it no colour mask, and enclosing shapes carry
+// the area as evenodd holes — genuinely transparent output.
+export interface BackgroundRemovalInfo {
+  removed: boolean;          // background confidently detected and cleared
+  bgLabel: number;           // detected background label (-1 if none)
+  borderShare: number;       // fraction of border pixels carrying bgLabel
+  outerPixels: number;       // pixels cleared by the border flood
+  // Per enclosed-island diagnostics (harness calibration + tests).
+  pockets: Array<{ size: number; meanDist: number; std: number; rampFrac: number; smoothFrac: number; killed: boolean; x0: number; y0: number; x1: number; y1: number }>;
+}
+
+export function removeBackgroundLabels(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  rgba: Uint8ClampedArray,
+  palette: Color[],
+  minBorderShare: number = 0.35,
+  meanTol: number = 24,
+  stdFactor: number = 2.5,
+  stdAbs: number = 30,
+  rampNeighbourTol: number = 60,
+  smoothFracMax: number = 0.3
+): BackgroundRemovalInfo {
+  const total = width * height;
+  const none: BackgroundRemovalInfo = { removed: false, bgLabel: -1, borderShare: 0, outerPixels: 0, pockets: [] };
+
+  // 1. Border-dominant label = the background candidate (255/transparent skipped).
+  const borderCounts = new Uint32Array(256);
+  let borderTotal = 0;
+  const countBorder = (i: number) => { const l = labels[i]; if (l !== 255) { borderCounts[l]++; borderTotal++; } };
+  for (let x = 0; x < width; x++) { countBorder(x); countBorder((height - 1) * width + x); }
+  for (let y = 1; y < height - 1; y++) { countBorder(y * width); countBorder(y * width + width - 1); }
+  if (borderTotal === 0) return none;
+  let bgLabel = -1, bgCount = 0;
+  for (let l = 0; l < 255; l++) if (borderCounts[l] > bgCount) { bgCount = borderCounts[l]; bgLabel = l; }
+  const borderShare = bgCount / borderTotal;
+  if (bgLabel < 0 || borderShare < minBorderShare) return none;
+
+  // Refuse to blank a (near-)flat image: there must be real non-background content.
+  let bgPixels = 0;
+  for (let i = 0; i < total; i++) if (labels[i] === bgLabel) bgPixels++;
+  let transparent = 0;
+  for (let i = 0; i < total; i++) if (labels[i] === 255) transparent++;
+  if (total - bgPixels - transparent < total * 0.005) return none;
+
+  // 2. Flood the background label from the border (8-connected) = outer background.
+  // region: 0 = untouched, 1 = outer background, 2 = enclosed island (assigned later).
+  const region = new Uint8Array(total);
+  const stack: number[] = [];
+  for (let x = 0; x < width; x++) {
+    if (labels[x] === bgLabel && region[x] === 0) { region[x] = 1; stack.push(x); }
+    const b = (height - 1) * width + x;
+    if (labels[b] === bgLabel && region[b] === 0) { region[b] = 1; stack.push(b); }
+  }
+  for (let y = 1; y < height - 1; y++) {
+    const l = y * width, r = y * width + width - 1;
+    if (labels[l] === bgLabel && region[l] === 0) { region[l] = 1; stack.push(l); }
+    if (labels[r] === bgLabel && region[r] === 0) { region[r] = 1; stack.push(r); }
+  }
+  let outerPixels = 0;
+  let sR = 0, sG = 0, sB = 0, sR2 = 0, sG2 = 0, sB2 = 0;
+  while (stack.length > 0) {
+    const i = stack.pop()!;
+    outerPixels++;
+    const pr = rgba[i * 4], pg = rgba[i * 4 + 1], pb = rgba[i * 4 + 2];
+    sR += pr; sG += pg; sB += pb; sR2 += pr * pr; sG2 += pg * pg; sB2 += pb * pb;
+    const px = i % width, py = (i / width) | 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      const ny = py + dy;
+      if (ny < 0 || ny >= height) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = px + dx;
+        if (nx < 0 || nx >= width) continue;
+        const ni = ny * width + nx;
+        if (region[ni] === 0 && labels[ni] === bgLabel) { region[ni] = 1; stack.push(ni); }
+      }
+    }
+  }
+  if (outerPixels === 0) return none;
+  const mR = sR / outerPixels, mG = sG / outerPixels, mB = sB / outerPixels;
+  const vOf = (s2: number, s1: number) => Math.sqrt(Math.max(0, s2 / outerPixels - (s1 / outerPixels) * (s1 / outerPixels)));
+  const bgStd = (vOf(sR2, sR) + vOf(sG2, sG) + vOf(sB2, sB)) / 3;
+  const stdCeil = Math.max(bgStd * stdFactor, stdAbs);
+
+  // Which labels count as "ramp neighbours": palette colours close to the outer
+  // background's mean. A pocket bordered by these is the visible end of a smooth
+  // shading ramp (e.g. background fading into a badge under letter tops) — clearing
+  // just its bg-labelled core would leave a hole inside the remaining ramp shapes.
+  const bgMean: Color = { r: mR, g: mG, b: mB, a: 255 };
+  const isRampLabel = new Uint8Array(256);
+  for (let l = 0; l < palette.length; l++) {
+    if (l !== bgLabel && colorDistance(palette[l], bgMean) <= rampNeighbourTol) isRampLabel[l] = 1;
+  }
+
+  // Raw-image gradient magnitude (channel-max central diff) — evaluated lazily at
+  // pocket boundary contacts. A TRUE pocket is fenced by drawn edges (high gradient
+  // all round); a patch that FADES into a neighbouring shape somewhere (letter-top
+  // wedge over a badge gradient, chrome highlight on brushed metal) has smooth
+  // boundary stretches, and clearing it would cut a visible hole in that ramp.
+  const gradAt = (i: number): number => {
+    const x = i % width, y = (i / width) | 0;
+    const xl = (y * width + (x > 0 ? x - 1 : x)) * 4, xr = (y * width + (x < width - 1 ? x + 1 : x)) * 4;
+    const yu = ((y > 0 ? y - 1 : y) * width + x) * 4, yd = ((y < height - 1 ? y + 1 : y) * width + x) * 4;
+    let g = 0;
+    for (let c = 0; c < 3; c++) {
+      const gx = Math.abs(rgba[xr + c] - rgba[xl + c]);
+      const gy = Math.abs(rgba[yd + c] - rgba[yu + c]);
+      if (gx > g) g = gx;
+      if (gy > g) g = gy;
+    }
+    return g;
+  };
+
+  // 3. Enclosed islands of the background label: kill only the ones whose raw
+  // pixels statistically ARE the background (flat + same colour).
+  const pockets: BackgroundRemovalInfo['pockets'] = [];
+  const compIdx: number[] = [];
+  for (let seed = 0; seed < total; seed++) {
+    if (labels[seed] !== bgLabel || region[seed] !== 0) continue;
+    compIdx.length = 0;
+    region[seed] = 2;
+    stack.push(seed);
+    let cR = 0, cG = 0, cB = 0, cR2 = 0, cG2 = 0, cB2 = 0;
+    let x0 = width, y0 = height, x1 = -1, y1 = -1;
+    let boundaryN = 0, rampN = 0, smoothN = 0;
+    while (stack.length > 0) {
+      const i = stack.pop()!;
+      compIdx.push(i);
+      const pr = rgba[i * 4], pg = rgba[i * 4 + 1], pb = rgba[i * 4 + 2];
+      cR += pr; cG += pg; cB += pb; cR2 += pr * pr; cG2 += pg * pg; cB2 += pb * pb;
+      const px = i % width, py = (i / width) | 0;
+      if (px < x0) x0 = px; if (px > x1) x1 = px;
+      if (py < y0) y0 = py; if (py > y1) y1 = py;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = py + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = px + dx;
+          if (nx < 0 || nx >= width) continue;
+          const ni = ny * width + nx;
+          if (labels[ni] === bgLabel) {
+            if (region[ni] === 0) { region[ni] = 2; stack.push(ni); }
+          } else if ((dx === 0) !== (dy === 0)) {
+            // 4-neighbour contact with another label = boundary sample.
+            const nl = labels[ni];
+            if (nl !== 255) {
+              boundaryN++;
+              if (isRampLabel[nl] === 1) rampN++;
+              if (Math.max(gradAt(i), gradAt(ni)) < 25) smoothN++;
+            }
+          }
+        }
+      }
+    }
+    const n = compIdx.length;
+    const dR = cR / n - mR, dG = cG / n - mG, dB = cB / n - mB;
+    const meanDist = Math.sqrt(dR * dR + dG * dG + dB * dB);
+    const cStdOf = (s2: number, s1: number) => Math.sqrt(Math.max(0, s2 / n - (s1 / n) * (s1 / n)));
+    const std = (cStdOf(cR2, cR) + cStdOf(cG2, cG) + cStdOf(cB2, cB)) / 3;
+    const rampFrac = boundaryN > 0 ? rampN / boundaryN : 0;
+    const smoothFrac = boundaryN > 0 ? smoothN / boundaryN : 0;
+    // Kill only pockets that (a) statistically ARE the background (mean close,
+    // flat — soft shadow wash near linework pushes std to ~25, hence the loose
+    // ceiling) and (b) are hard-enclosed: mostly drawn edges on the boundary.
+    // Calibrated on real logos: true pockets (gear notches, between boom parts)
+    // ran smooth 0.00–0.25; white CONTENT (chrome letter highlights, letter-top
+    // wedges over a badge gradient) ran 0.36–0.80. Biased toward KEEPING —
+    // a missed pocket is a one-click delete in the editor, damaged content isn't.
+    const killed = meanDist <= meanTol && std <= stdCeil && smoothFrac <= smoothFracMax;
+    pockets.push({ size: n, meanDist, std, rampFrac, smoothFrac, killed, x0, y0, x1, y1 });
+    if (killed) for (const i of compIdx) labels[i] = 255;
+  }
+
+  // 4. Clear the outer background.
+  for (let i = 0; i < total; i++) if (region[i] === 1) labels[i] = 255;
+
+  return { removed: true, bgLabel, borderShare, outerPixels, pockets };
+}
+
 // Recompute each palette entry as the mean of the pixels ACTUALLY assigned to it.
 // The palette was estimated from a sparse sample before cleanup; after merging /
 // consolidation the label contents have shifted, and the true per-label mean is a
 // strictly better fill colour for the final SVG.
+// When width/height are given, the mean prefers INTERIOR pixels (all 4-neighbours
+// share the label): boundary pixels are anti-alias blends with the neighbouring
+// colour, and folding them in washes every fill toward its surroundings — thin
+// bright details go dull, dark inks go grey. Labels that are mostly boundary
+// (thin outlines, hairlines) keep the all-pixel mean, which for them is the
+// honest estimate.
 export function refreshPaletteFromLabels(
   labels: Uint8Array,
   rgba: Uint8ClampedArray,
-  palette: Color[]
+  palette: Color[],
+  width?: number,
+  height?: number
 ): Color[] {
   const n = palette.length;
   const sumR = new Float64Array(n), sumG = new Float64Array(n), sumB = new Float64Array(n);
   const count = new Float64Array(n);
+  const inR = new Float64Array(n), inG = new Float64Array(n), inB = new Float64Array(n);
+  const inCount = new Float64Array(n);
+  const useInterior = width !== undefined && height !== undefined && width * height === labels.length;
   for (let i = 0; i < labels.length; i++) {
     const l = labels[i];
     if (l >= n) continue; // 255 transparent marker
-    sumR[l] += rgba[i * 4];
-    sumG[l] += rgba[i * 4 + 1];
-    sumB[l] += rgba[i * 4 + 2];
+    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+    sumR[l] += r; sumG[l] += g; sumB[l] += b;
     count[l]++;
+    if (useInterior) {
+      const x = i % width!, y = (i / width!) | 0;
+      if (x > 0 && x < width! - 1 && y > 0 && y < height! - 1 &&
+          labels[i - 1] === l && labels[i + 1] === l && labels[i - width!] === l && labels[i + width!] === l) {
+        inR[l] += r; inG[l] += g; inB[l] += b;
+        inCount[l]++;
+      }
+    }
   }
-  return palette.map((c, l) => count[l] > 0
-    ? { r: Math.round(sumR[l] / count[l]), g: Math.round(sumG[l] / count[l]), b: Math.round(sumB[l] / count[l]), a: c.a }
-    : c);
+  return palette.map((c, l) => {
+    // Interior mean only when it rests on a meaningful share of the label's pixels.
+    if (inCount[l] >= 16 && inCount[l] >= count[l] * 0.05) {
+      return { r: Math.round(inR[l] / inCount[l]), g: Math.round(inG[l] / inCount[l]), b: Math.round(inB[l] / inCount[l]), a: c.a };
+    }
+    return count[l] > 0
+      ? { r: Math.round(sumR[l] / count[l]), g: Math.round(sumG[l] / count[l]), b: Math.round(sumB[l] / count[l]), a: c.a }
+      : c;
+  });
 }
 
 export function colorToHex(color: Color): string {

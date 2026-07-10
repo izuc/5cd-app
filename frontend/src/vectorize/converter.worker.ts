@@ -1,7 +1,7 @@
 // Web Worker for image conversion - Simple reliable vectorization
 
 import type { Color, ShapeData } from './types';
-import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap } from './colorQuantization';
+import { medianCutQuantization, quantizeImage, preprocessImage, adaptiveClean, createForegroundMask, mergeSimilarColors, createTransparencyMask, upscaleMask, denoiseQuantized, consolidateRegions, mergeInkColors, refineLabelsMRF, refreshPaletteFromLabels, computeLambdaMap, removeBackgroundLabels } from './colorQuantization';
 import { traceAllColors, generateSvg } from './pathTracing';
 
 type QualityLevel = 'fast' | 'balanced' | 'high' | 'detailed';
@@ -39,14 +39,39 @@ function createImageData(width: number, height: number, data: Uint8ClampedArray)
   return { width, height, data, colorSpace: 'srgb' } as ImageData;
 }
 
-// Nearest-neighbour upscale of a label map — preserves crisp quantised edges so we
-// can trace boundaries at higher resolution (smoother curves) without re-softening.
-function upscaleLabels(labels: Uint8Array, w: number, h: number, sf: number): Uint8Array {
+// Upscale of a label map for higher-resolution boundary tracing. Bilinear
+// indicator argmax: each output pixel takes the label with the highest
+// bilinearly-interpolated indicator weight among its 4 nearest native pixels.
+// Boundaries land at sub-native-pixel positions instead of the full-pixel
+// stair-steps nearest-neighbour produces — traced digits/outlines come out
+// visibly smoother, and one gated denoise pass replaces the two NN needed.
+// (255 transparent marker is just another label to the argmax.)
+function upscaleLabelsBilinear(labels: Uint8Array, w: number, h: number, sf: number): Uint8Array {
   const nw = w * sf, nh = h * sf;
   const out = new Uint8Array(nw * nh);
+  const ls = new Int32Array(4), ws = new Float64Array(4);
   for (let y = 0; y < nh; y++) {
-    const sy = (y / sf) | 0;
-    for (let x = 0; x < nw; x++) out[y * nw + x] = labels[sy * w + ((x / sf) | 0)];
+    const ys = (y + 0.5) / sf - 0.5;
+    const y0 = Math.max(0, Math.floor(ys)), y1 = Math.min(h - 1, y0 + 1);
+    const fy = Math.min(1, Math.max(0, ys - y0));
+    for (let x = 0; x < nw; x++) {
+      const xs = (x + 0.5) / sf - 0.5;
+      const x0 = Math.max(0, Math.floor(xs)), x1 = Math.min(w - 1, x0 + 1);
+      const fx = Math.min(1, Math.max(0, xs - x0));
+      ls[0] = labels[y0 * w + x0]; ws[0] = (1 - fx) * (1 - fy);
+      ls[1] = labels[y0 * w + x1]; ws[1] = fx * (1 - fy);
+      ls[2] = labels[y1 * w + x0]; ws[2] = (1 - fx) * fy;
+      ls[3] = labels[y1 * w + x1]; ws[3] = fx * fy;
+      let best = ls[0];
+      let bestW = 0;
+      for (let i = 0; i < 4; i++) {
+        if (ls[i] < 0) continue;
+        let wt = ws[i];
+        for (let j = i + 1; j < 4; j++) if (ls[j] === ls[i]) { wt += ws[j]; ls[j] = -1; }
+        if (wt > bestW) { bestW = wt; best = ls[i]; }
+      }
+      out[y * nw + x] = best;
+    }
   }
   return out;
 }
@@ -124,12 +149,26 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       const nativeFloor = Math.max(4, Math.round(origWidth * origHeight * 5e-6) + 2);
       const nativeLabels = consolidateRegions(inked.quantized, origWidth, origHeight, finalPalette, Math.max(8, minArea), nativeFloor);
 
+      // Smart background removal at the label level: flood the border-dominant
+      // colour from the edges (outer background) AND clear enclosed same-colour
+      // pockets whose raw pixels statistically match it, while sparing white
+      // CONTENT (chrome highlights etc.) that merely shares the palette entry.
+      // Removed pixels become the 255 transparent marker; the trace then simply
+      // never draws them and enclosing shapes keep the area as evenodd holes.
+      let bgRemoved = false;
+      if (removeBackground) {
+        postProgress(0.575, 'Removing background...');
+        bgRemoved = removeBackgroundLabels(nativeLabels, origWidth, origHeight, processedData, finalPalette).removed;
+      }
+
       // Truer fills: recompute each palette entry as the mean of its actual pixels
       // now that merging/consolidation has settled the label map.
-      const displayPalette = refreshPaletteFromLabels(nativeLabels, processedData, finalPalette);
+      const displayPalette = refreshPaletteFromLabels(nativeLabels, processedData, finalPalette, origWidth, origHeight);
 
-      // Background / transparency masks (at native res).
-      const foregroundMask: Uint8Array | null = removeBackground ? createForegroundMask(processedImgDataObj, 4) : null;
+      // Legacy silhouette mask only as a FALLBACK when no confident border-dominant
+      // background exists (e.g. full-bleed art) — the label-level removal above is
+      // strictly better when it applies.
+      const foregroundMask: Uint8Array | null = removeBackground && !bgRemoved ? createForegroundMask(processedImgDataObj, 4) : null;
       let finalMask: Uint8Array | null = null;
       if (transparencyMask && foregroundMask) {
         finalMask = new Uint8Array(transparencyMask.length);
@@ -146,15 +185,15 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       let traceLabels = nativeLabels;
       if (scaleFactor > 1) {
         postProgress(0.58, 'Upscaling for smooth curves...');
-        traceLabels = upscaleLabels(nativeLabels, origWidth, origHeight, scaleFactor);
+        traceLabels = upscaleLabelsBilinear(nativeLabels, origWidth, origHeight, scaleFactor);
         if (finalMask) finalMask = upscaleMask(finalMask, origWidth, origHeight, scaleFactor);
         workingWidth = origWidth * scaleFactor;
         workingHeight = origHeight * scaleFactor;
-        // Two majority passes on the upscaled labels round off the nearest-neighbour
-        // stair-steps and re-absorb thin intermediate-shade slivers along edges, so
-        // boundaries trace as clean lines instead of patchy/wavy ones. Contrast-gated
-        // (via the palette) so it can't nibble thin high-contrast outlines.
-        traceLabels = denoiseQuantized(traceLabels, workingWidth, workingHeight, 2, finalPalette);
+        // One gated majority pass re-absorbs thin intermediate-shade slivers along
+        // edges (bilinear upscaling already positions boundaries sub-pixel, so the
+        // second pass NN needed is gone). Contrast-gated via the palette so it
+        // can't nibble thin high-contrast outlines.
+        traceLabels = denoiseQuantized(traceLabels, workingWidth, workingHeight, 1, finalPalette);
       }
 
       postProgress(0.6, 'Tracing shapes...');
@@ -181,7 +220,12 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       );
 
       postProgress(0.95, 'Generating SVG...');
-      const svgContent = generateSvg(pathData, origWidth, origHeight, removeBackground, scaleFactor, hasTransparentSource);
+      // When the label-level removal ran, the background simply isn't in the shape
+      // set any more — use standard mode. The generateSvg remove-bg branch (drop
+      // dominant-colour shapes) is only for the legacy fallback; running it on top
+      // of label-level removal would misclassify some other edge-touching colour
+      // as "the background" and drop real content.
+      const svgContent = generateSvg(pathData, origWidth, origHeight, removeBackground && !bgRemoved, scaleFactor, hasTransparentSource);
 
       self.postMessage({
         type: 'complete',
