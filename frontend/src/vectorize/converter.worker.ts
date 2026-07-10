@@ -164,9 +164,16 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       // Reconnect "dotted" hairlines: blend pixels where a ~1px bright/dark line
       // lost its label are still luminance ridges in the raw image — relabel
       // them back to the line so the thin-link pass below can chain the dashes
-      // into one continuous stroke.
+      // into one continuous stroke. Iterated: each pass reconnects pixels that
+      // give the NEXT pass anchors, so lines grow into fainter territory.
+      // Three passes measured best (a fourth starts thickening beyond truth).
       postProgress(0.577, 'Reconnecting lines...');
-      const ridged = reinforceRidges(nativeLabels, origWidth, origHeight, processedData, finalPalette).labels;
+      let ridged = nativeLabels;
+      for (let ri = 0; ri < 3; ri++) {
+        const r = reinforceRidges(ridged, origWidth, origHeight, processedData, finalPalette);
+        ridged = r.labels;
+        if (r.changed === 0) break;
+      }
 
       // Merge adjacent bands of one smooth ramp into single regions — they trace
       // as one shape with one fitted gradient instead of a patchwork of flat bands.
