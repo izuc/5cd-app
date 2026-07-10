@@ -1033,48 +1033,46 @@ interface GradSums {
   scx: Float64Array;  // Σ channel · x
   scy: Float64Array;  // Σ channel · y
   scc: Float64Array;  // Σ channel²
-  cmin: Float64Array; // observed channel minimum
-  cmax: Float64Array; // observed channel maximum
 }
 
-// Fit a linear colour ramp to a component and decide whether a linearGradient
-// fill is warranted. Quantisation flattens smooth shading (metallic chrome,
-// airbrushed fades) into banded fills; where a plane c(x,y)=a+bx+cy explains the
-// component's colour variation well AND the ramp is big enough to see, a real
-// gradient both looks smoother and melts the banding between neighbouring
-// shapes (each band's fit passes close to the true ramp, so bands meet
-// near-seamlessly). Returns undefined for genuinely flat or textured regions.
-function fitLinearGradient(
+// Fit a colour ramp to a component and decide whether a gradient fill is
+// warranted. Quantisation flattens smooth shading (metallic chrome, airbrushed
+// fades) into banded fills; this fits a 1-D colour PROFILE along the dominant
+// ramp direction — binned means of the component's own pixels, simplified to a
+// few stops — so curved ramps (specular sheens: dark → bright band → dark) are
+// captured too, which a straight 2-stop linear model cannot represent. The
+// plane fit supplies only the DIRECTION; acceptance is judged on the profile
+// residual, so nonlinear-but-1-D ramps pass while genuinely textured regions
+// (brushed-metal noise) keep a high within-bin variance and stay flat-filled.
+function fitShapeGradient(
   g: GradSums,
-  bx0: number, by0: number, bx1: number, by1: number // component bbox, native coords
+  samples: Int32Array,   // native pixel indices of the component's samples [0..g.n)
+  tBuf: Float32Array,    // scratch: projection of each sample onto the ramp axis
+  rgba: Uint8ClampedArray,
+  srcW: number
 ): ShapeGradient | undefined {
   if (g.n < 300) return undefined;
 
-  // Solve the shared 3×3 normal equations via the explicit inverse (Cramer).
+  // Plane fit (shared 3×3 normal equations, explicit inverse) → ramp direction.
   const m00 = g.n, m01 = g.sx, m02 = g.sy;
   const m11 = g.sxx, m12 = g.sxy, m22 = g.syy;
   const det = m00 * (m11 * m22 - m12 * m12) - m01 * (m01 * m22 - m12 * m02) + m02 * (m01 * m12 - m11 * m02);
-  // Degenerate spatial spread (hairline components) — no reliable plane.
+  // Degenerate spatial spread (hairline components) — no reliable direction.
   if (!(Math.abs(det) > 1e-3 * g.n)) return undefined;
-  const i00 = (m11 * m22 - m12 * m12) / det;
+  // (Only the slope rows of the inverse are needed — the intercept doesn't
+  // affect the ramp direction.)
   const i01 = (m02 * m12 - m01 * m22) / det;
   const i02 = (m01 * m12 - m02 * m11) / det;
   const i11 = (m00 * m22 - m02 * m02) / det;
   const i12 = (m01 * m02 - m00 * m12) / det;
   const i22 = (m00 * m11 - m01 * m01) / det;
-
-  const a = new Float64Array(3), b = new Float64Array(3), c = new Float64Array(3);
-  let sseFlat = 0, ssePlane = 0;
+  const b = new Float64Array(3), c = new Float64Array(3);
+  let sseFlat = 0;
   for (let ch = 0; ch < 3; ch++) {
-    a[ch] = i00 * g.sc[ch] + i01 * g.scx[ch] + i02 * g.scy[ch];
     b[ch] = i01 * g.sc[ch] + i11 * g.scx[ch] + i12 * g.scy[ch];
     c[ch] = i02 * g.sc[ch] + i12 * g.scx[ch] + i22 * g.scy[ch];
     sseFlat += Math.max(0, g.scc[ch] - (g.sc[ch] * g.sc[ch]) / g.n);
-    ssePlane += Math.max(0, g.scc[ch] - (a[ch] * g.sc[ch] + b[ch] * g.scx[ch] + c[ch] * g.scy[ch]));
   }
-  // The plane must genuinely explain the variation — textured regions (brushed
-  // metal noise, speckle) keep a high residual and stay flat-filled.
-  if (!(ssePlane <= 0.6 * sseFlat)) return undefined;
 
   // Ramp direction: dominant eigenvector of Σ (per-channel gradient)·(gradientᵀ),
   // so channels moving in opposite directions (blue up, red down) still agree.
@@ -1091,30 +1089,98 @@ function fitLinearGradient(
   const dl = Math.hypot(dx, dy);
   dx /= dl; dy /= dl;
 
-  // Endpoints: extreme projections of the bbox corners along the ramp direction,
-  // measured from the centroid (keeps the line anchored inside the shape).
+  // Project every sample onto the axis; endpoints come from the OBSERVED
+  // extremes (bbox corners extrapolate on diagonal/L-shaped regions).
   const mx = g.sx / g.n, my = g.sy / g.n;
   let tmin = Infinity, tmax = -Infinity;
-  for (const [px, py] of [[bx0, by0], [bx1, by0], [bx0, by1], [bx1, by1]] as const) {
-    const t = dx * (px - mx) + dy * (py - my);
+  for (let k = 0; k < g.n; k++) {
+    const i = samples[k];
+    const t = dx * ((i % srcW) - mx) + dy * (((i / srcW) | 0) - my);
+    tBuf[k] = t;
     if (t < tmin) tmin = t;
     if (t > tmax) tmax = t;
   }
-  // Clamp stops to the OBSERVED channel range: bbox-corner endpoints extrapolate
-  // beyond the component's mass on diagonal/L-shaped regions, and unclamped
-  // extrapolation can invert hue (one channel keeps climbing while others fall).
-  const clamp = (v: number, ch: number) => Math.max(g.cmin[ch], Math.min(g.cmax[ch], Math.round(v)));
-  const evalAt = (x: number, y: number): Color => ({ r: clamp(a[0] + b[0] * x + c[0] * y, 0), g: clamp(a[1] + b[1] * x + c[1] * y, 1), b: clamp(a[2] + b[2] * x + c[2] * y, 2), a: 255 });
-  const x1 = mx + dx * tmin, y1 = my + dy * tmin;
-  const x2 = mx + dx * tmax, y2 = my + dy * tmax;
-  const c0 = evalAt(x1, y1), c1 = evalAt(x2, y2);
+  if (!(tmax - tmin >= 6)) return undefined; // ramp too short to matter
 
-  // Below a visible ramp span a flat fill is indistinguishable and cheaper.
-  const span = Math.max(Math.abs(c0.r - c1.r), Math.abs(c0.g - c1.g), Math.abs(c0.b - c1.b));
+  // 1-D profile: binned channel means along the axis.
+  const K = 12;
+  const bn = new Float64Array(K);
+  const bsc = [new Float64Array(K), new Float64Array(K), new Float64Array(K)];
+  const bscc = [new Float64Array(K), new Float64Array(K), new Float64Array(K)];
+  const tspan = tmax - tmin;
+  for (let k = 0; k < g.n; k++) {
+    const bi = Math.min(K - 1, (((tBuf[k] - tmin) / tspan) * K) | 0);
+    const i4 = samples[k] * 4;
+    bn[bi]++;
+    for (let ch = 0; ch < 3; ch++) {
+      const v = rgba[i4 + ch];
+      bsc[ch][bi] += v; bscc[ch][bi] += v * v;
+    }
+  }
+  // Profile residual = within-bin variance; the profile must genuinely explain
+  // the component's variation or a flat fill is more honest.
+  let sseProfile = 0;
+  for (let bi = 0; bi < K; bi++) {
+    if (bn[bi] === 0) continue;
+    for (let ch = 0; ch < 3; ch++) sseProfile += Math.max(0, bscc[ch][bi] - (bsc[ch][bi] * bsc[ch][bi]) / bn[bi]);
+  }
+  if (!(sseProfile <= 0.55 * sseFlat)) return undefined;
+
+  // Stop candidates: non-empty bin means at their bin centres, endpoints pinned
+  // to t=0 / t=1. Bin means are actual pixel means, so no range clamping needed.
+  type P = { t: number; r: number; g: number; b: number };
+  const pts: P[] = [];
+  for (let bi = 0; bi < K; bi++) {
+    if (bn[bi] < Math.max(2, g.n / (K * 20))) continue; // starved bin — unreliable mean
+    pts.push({ t: (bi + 0.5) / K, r: bsc[0][bi] / bn[bi], g: bsc[1][bi] / bn[bi], b: bsc[2][bi] / bn[bi] });
+  }
+  if (pts.length < 2) return undefined;
+  pts[0].t = 0;
+  pts[pts.length - 1].t = 1;
+
+  // Visible ramp span across the whole profile.
+  let span = 0;
+  for (let ch = 0; ch < 3; ch++) {
+    let lo = 255, hi = 0;
+    for (const p of pts) { const v = ch === 0 ? p.r : ch === 1 ? p.g : p.b; if (v < lo) lo = v; if (v > hi) hi = v; }
+    if (hi - lo > span) span = hi - lo;
+  }
   if (span < 14) return undefined;
 
+  // Simplify to few stops: recursively keep the point deviating most from the
+  // linear interpolation of its kept neighbours (Douglas-Peucker in colour-t space).
+  const keep = new Set<number>([0, pts.length - 1]);
+  const rec = (i0: number, i1: number) => {
+    if (i1 - i0 < 2 || keep.size >= 6) return;
+    let best = -1, bestDev = 0;
+    for (let k = i0 + 1; k < i1; k++) {
+      const f = (pts[k].t - pts[i0].t) / Math.max(1e-9, pts[i1].t - pts[i0].t);
+      const dr = pts[k].r - (pts[i0].r + (pts[i1].r - pts[i0].r) * f);
+      const dg = pts[k].g - (pts[i0].g + (pts[i1].g - pts[i0].g) * f);
+      const db = pts[k].b - (pts[i0].b + (pts[i1].b - pts[i0].b) * f);
+      const dev = Math.max(Math.abs(dr), Math.abs(dg), Math.abs(db));
+      if (dev > bestDev) { bestDev = dev; best = k; }
+    }
+    if (best >= 0 && bestDev > 4) {
+      keep.add(best);
+      rec(i0, best);
+      rec(best, i1);
+    }
+  };
+  rec(0, pts.length - 1);
+
+  const rc = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  const stops = Array.from(keep).sort((p, q) => p - q).map((k) => ({
+    t: Math.round(pts[k].t * 1000) / 1000,
+    c: { r: rc(pts[k].r), g: rc(pts[k].g), b: rc(pts[k].b), a: 255 } as Color,
+  }));
+
   const r1 = (v: number) => Math.round(v * 10) / 10;
-  return { x1: r1(x1), y1: r1(y1), x2: r1(x2), y2: r1(y2), c0, c1 };
+  return {
+    x1: r1(mx + dx * tmin), y1: r1(my + dy * tmin),
+    x2: r1(mx + dx * tmax), y2: r1(my + dy * tmax),
+    stops,
+  };
 }
 
 export function traceAllColors(
@@ -1159,31 +1225,32 @@ export function traceAllColors(
 
   // Gradient fitting samples the native-res source on the native grid (every
   // sfi-th working pixel) — statistically identical to sampling every working
-  // pixel at a fraction of the cost. Sums live in `gs`, reset per component.
+  // pixel at a fraction of the cost. Sums live in `gs`, reset per component;
+  // sample indices are kept (reusable buffers) so the profile fit can bin the
+  // component's pixels along the ramp axis once the direction is known.
   const doGrad = !!(sourceRgba && sourceWidth > 0 && sourceHeight > 0 && width % sourceWidth === 0);
   const sfi = doGrad ? Math.max(1, Math.round(width / sourceWidth)) : 1;
+  const gradSamples = doGrad ? new Int32Array(sourceWidth * sourceHeight) : new Int32Array(0);
+  const gradT = doGrad ? new Float32Array(sourceWidth * sourceHeight) : new Float32Array(0);
   const gs: GradSums = {
     n: 0, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0,
     sc: new Float64Array(3), scx: new Float64Array(3), scy: new Float64Array(3), scc: new Float64Array(3),
-    cmin: new Float64Array(3), cmax: new Float64Array(3),
   };
   const gradAccum = (px: number, py: number) => {
     if (px % sfi !== 0 || py % sfi !== 0) return;
     const gx = px / sfi, gy = py / sfi;
-    const si = (gy * sourceWidth + gx) * 4;
+    const si = gy * sourceWidth + gx;
+    gradSamples[gs.n] = si;
     gs.n++;
     gs.sx += gx; gs.sy += gy; gs.sxx += gx * gx; gs.syy += gy * gy; gs.sxy += gx * gy;
     for (let ch = 0; ch < 3; ch++) {
-      const v = sourceRgba![si + ch];
+      const v = sourceRgba![si * 4 + ch];
       gs.sc[ch] += v; gs.scx[ch] += v * gx; gs.scy[ch] += v * gy; gs.scc[ch] += v * v;
-      if (v < gs.cmin[ch]) gs.cmin[ch] = v;
-      if (v > gs.cmax[ch]) gs.cmax[ch] = v;
     }
   };
   const gradReset = () => {
     gs.n = 0; gs.sx = 0; gs.sy = 0; gs.sxx = 0; gs.syy = 0; gs.sxy = 0;
     gs.sc.fill(0); gs.scx.fill(0); gs.scy.fill(0); gs.scc.fill(0);
-    gs.cmin.fill(255); gs.cmax.fill(0);
   };
 
   // Process each color separately with optional merging
@@ -1384,9 +1451,9 @@ export function traceAllColors(
             }
           }
 
-          // Linear-ramp fit (native/viewBox coordinates; bbox mapped from working res).
+          // Colour-ramp fit (native/viewBox coordinates).
           const gradient = doGrad
-            ? fitLinearGradient(gs, cbx0 / sfi, cby0 / sfi, cbx1 / sfi, cby1 / sfi)
+            ? fitShapeGradient(gs, gradSamples, gradT, sourceRgba!, sourceWidth)
             : undefined;
 
           result.push({
@@ -1515,10 +1582,11 @@ export function generateSvg(
   const paintFor = (hex: string, gradient?: ShapeGradient): string => {
     if (!gradient) return hex;
     const id = `lg${gradDefs.length}`;
+    let stops = '';
+    for (const s of gradient.stops) stops += `<stop offset="${s.t}" stop-color="${colorToHex(s.c)}"/>`;
     gradDefs.push(
       `    <linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${gradient.x1}" y1="${gradient.y1}" x2="${gradient.x2}" y2="${gradient.y2}">` +
-      `<stop offset="0" stop-color="${colorToHex(gradient.c0)}"/>` +
-      `<stop offset="1" stop-color="${colorToHex(gradient.c1)}"/>` +
+      stops +
       `</linearGradient>\n`
     );
     return `url(#${id})`;
